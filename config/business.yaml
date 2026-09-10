@@ -1,0 +1,21 @@
+# Configuración del negocio — Generado por AgentKit
+negocio:
+  nombre: "2 Body Pachuca"
+  descripcion: "Spa y centro de estética en Pachuca de Soto, Hidalgo. Tratamientos corporales, faciales, depilación láser y masajes de spa."
+  horario: "Lunes a Viernes de 9:00 a 20:00, Sábados de 9:00 a 14:00, Domingos cerrado"
+  direccion: "Edificio Torres de la Plata #107, Zona Plateada, C.P. 42084, Pachuca de Soto, Hidalgo"
+  telefono: "771 166 0357"
+  whatsapp: "+52 764 101 2505"
+
+agente:
+  nombre: "Sofía"
+  tono: "empático y cálido"
+  casos_de_uso:
+    - "Responder preguntas frecuentes (servicios, horarios, ubicación)"
+    - "Agendar citas y valoraciones"
+    - "Calificar y atender leads / ventas"
+
+metadata:
+  creado: "2026-09-10"
+  proveedor: "zernio"
+  version: "2.0"
