@@ -11,6 +11,8 @@ import logging
 import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
@@ -44,6 +46,34 @@ logger = logging.getLogger("agentkit")
 logger.setLevel(logging.DEBUG if ENVIRONMENT == "development" else logging.INFO)
 
 PORT = int(os.getenv("PORT", "8000"))
+
+# ── Horario de respuesta de Sofía ──────────────────────────────────────────
+# Sofía SOLO auto-responde fuera del horario de atención del equipo humano.
+# Durante el horario del equipo (abajo) se queda callada: en coexistencia esos
+# mensajes los ve el equipo en la app de WhatsApp del celular y responden a mano.
+#
+#   Sofía RESPONDE:  Lun-Vie 20:30 -> 08:00  ·  Sáb 14:30 -> Lun 08:00 (finde completo)
+#   Sofía CALLADA:   Lun-Vie 08:00-20:30     ·  Sáb 08:00-14:30        (atiende el equipo)
+#
+# Zona horaria de Pachuca. Railway corre en UTC, por eso convertimos explícito.
+TZ_NEGOCIO = ZoneInfo("America/Mexico_City")
+
+
+def sofia_debe_responder(ahora: datetime | None = None) -> bool:
+    """True si Sofía debe auto-responder ahora (fuera del horario del equipo humano)."""
+    ahora = ahora or datetime.now(TZ_NEGOCIO)
+    dow = ahora.weekday()  # 0=Lun ... 5=Sáb, 6=Dom
+    t = ahora.time()
+
+    if dow <= 4:  # Lunes a Viernes: el equipo atiende 08:00-20:30
+        equipo_atiende = time(8, 0) <= t < time(20, 30)
+    elif dow == 5:  # Sábado: el equipo atiende 08:00-14:30
+        equipo_atiende = time(8, 0) <= t < time(14, 30)
+    else:  # Domingo: el equipo no atiende, Sofía responde todo el día
+        equipo_atiende = False
+
+    return not equipo_atiende
+
 
 # Un candado por numero de telefono. En WhatsApp es normal que alguien mande "hola" y
 # medio segundo despues la pregunta de verdad: sin esto los dos mensajes se procesarian
@@ -145,6 +175,12 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
         # Un payload raro no debe hacer que el proveedor reintente para siempre
         logger.error(f"No se pudo leer el webhook: {e}")
         return {"status": "ignorado"}
+
+    # Horario de respuesta: dentro del horario del equipo humano, Sofía se calla y
+    # deja que el equipo atienda desde la app de WhatsApp (coexistencia).
+    if not sofia_debe_responder():
+        logger.info("Dentro del horario del equipo; Sofía no responde (atiende el equipo).")
+        return {"status": "ok", "encolados": 0, "motivo": "horario_equipo"}
 
     encolados = 0
     for msg in mensajes:
