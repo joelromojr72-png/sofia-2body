@@ -265,3 +265,104 @@ def crear_cita(
     cuando = f"{dia_txt} {inicio.day} a las {inicio.strftime('%H:%M')}"
     logger.info(f"Cita creada en calendario: {cuerpo['summary']} @ {inicio.isoformat()}")
     return {"ok": True, "cuando": cuando, "link": ev.get("htmlLink", "")}
+
+
+def buscar_citas_de(telefono: str, dias_adelante: int = 90) -> list[dict]:
+    """
+    Devuelve las próximas citas de UNA clienta (identificada por su WhatsApp), para
+    poder cancelar/reagendar. Filtra por el teléfono guardado en la descripción del evento.
+
+    Cada item: {"evento_id", "cuando", "servicio", "titulo"}.
+    """
+    svc = _obtener_servicio()
+    if not svc:
+        return []
+    tel_digits = "".join(c for c in (telefono or "") if c.isdigit())
+    if not tel_digits:
+        return []
+    ahora = datetime.now(TZ)
+    fin = ahora + timedelta(days=dias_adelante)
+    try:
+        resp = (
+            svc.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                timeMin=ahora.isoformat(),
+                timeMax=fin.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error buscando citas: {e}")
+        return []
+
+    citas = []
+    for ev in resp.get("items", []):
+        desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
+        if tel_digits not in desc_digits:
+            continue
+        ini = ev.get("start", {}).get("dateTime")
+        if not ini:
+            continue
+        try:
+            di = datetime.fromisoformat(ini).astimezone(TZ)
+        except ValueError:
+            continue
+        # Extrae el servicio del summary: "Cita (por confirmar) - <servicio> - <nombre>"
+        partes = ev.get("summary", "").split(" - ")
+        servicio = partes[1] if len(partes) >= 2 else ev.get("summary", "cita")
+        citas.append(
+            {
+                "evento_id": ev.get("id", ""),
+                "cuando": f"{_DIAS[di.weekday()]} {di.day} a las {di.strftime('%H:%M')}",
+                "servicio": servicio,
+                "titulo": ev.get("summary", ""),
+            }
+        )
+    return citas
+
+
+def cancelar_cita(evento_id: str, telefono: str) -> dict:
+    """
+    Cancela (borra) una cita del calendario. Por seguridad SOLO borra si la cita
+    pertenece a esa clienta (su WhatsApp está en la descripción del evento).
+
+    Retorna {"ok": True, "cuando": "..."} o {"ok": False, "error": "..."}.
+    """
+    svc = _obtener_servicio()
+    if not svc:
+        return {"ok": False, "error": "La agenda no esta configurada."}
+    if not evento_id:
+        return {"ok": False, "error": "Falta el identificador de la cita."}
+
+    try:
+        ev = svc.events().get(calendarId=CALENDAR_ID, eventId=evento_id).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error leyendo la cita a cancelar: {e}")
+        return {"ok": False, "error": "No encontré esa cita."}
+
+    tel_digits = "".join(c for c in (telefono or "") if c.isdigit())
+    desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
+    if tel_digits and tel_digits not in desc_digits:
+        # No es la cita de esta clienta: no se toca (evita cancelar la de alguien más).
+        return {"ok": False, "error": "Esa cita no está a tu nombre; no puedo cancelarla."}
+
+    ini = ev.get("start", {}).get("dateTime")
+    cuando = ""
+    if ini:
+        try:
+            di = datetime.fromisoformat(ini).astimezone(TZ)
+            cuando = f"{_DIAS[di.weekday()]} {di.day} a las {di.strftime('%H:%M')}"
+        except ValueError:
+            pass
+
+    try:
+        svc.events().delete(calendarId=CALENDAR_ID, eventId=evento_id).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error cancelando la cita: {e}")
+        return {"ok": False, "error": "No se pudo cancelar en la agenda."}
+
+    logger.info(f"Cita cancelada en calendario: {ev.get('summary','')} ({evento_id})")
+    return {"ok": True, "cuando": cuando}

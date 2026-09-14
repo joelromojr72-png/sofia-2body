@@ -107,6 +107,33 @@ HERRAMIENTAS = [
             "required": ["nombre", "servicio", "fecha_hora"],
         },
     },
+    {
+        "name": "consultar_mis_citas",
+        "description": (
+            "Lista las próximas citas de la clienta con la que estás hablando (se identifica "
+            "sola por su WhatsApp). Úsala cuando quiera cancelar, cambiar o confirmar su cita, "
+            "para saber cuál es y obtener su identificador antes de cancelar."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "cancelar_cita",
+        "description": (
+            "Cancela (borra) una cita de la clienta. Usa el `evento_id` que te dio "
+            "`consultar_mis_citas`. Llama esto SOLO después de confirmar con la clienta cuál "
+            "cita quiere cancelar. Si tiene varias, pregúntale cuál antes de cancelar."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "evento_id": {
+                    "type": "string",
+                    "description": "Identificador de la cita a cancelar (de consultar_mis_citas).",
+                }
+            },
+            "required": ["evento_id"],
+        },
+    },
 ]
 
 
@@ -166,7 +193,11 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "4) Al confirmarse, dile que su espacio quedó apartado (por confirmar) y que el "
             "equipo le confirma por aquí. Las valoraciones son sin costo y duran ~60 min.\n"
             "No inventes horarios: siempre revisa con la herramienta. Si la herramienta falla, "
-            "toma la solicitud y dile que el equipo confirma."
+            "toma la solicitud y dile que el equipo confirma.\n"
+            "Para CANCELAR: usa `consultar_mis_citas` para ver sus citas; si tiene una sola, "
+            "confirma con ella que esa quiere cancelar y usa `cancelar_cita`; si tiene varias, "
+            "pregúntale cuál. Nunca canceles sin confirmar. Los evento_id son internos: no se "
+            "los muestres. Para REAGENDAR: cancela la anterior y agenda la nueva."
         )
     return (
         "\n\n## Agenda\n"
@@ -240,6 +271,38 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
             return (
                 f"NO se pudo agendar: {res.get('error', 'error desconocido')}. "
                 "Ofrécele otra hora o pasar con el equipo, sin alarmarla."
+            )
+
+        if nombre == "consultar_mis_citas":
+            citas = await asyncio.to_thread(calendar_tool.buscar_citas_de, telefono or "")
+            if not citas:
+                return (
+                    "La clienta no tiene citas próximas registradas a su WhatsApp. "
+                    "Si cree que sí tiene una, ofrece pasar con el equipo para revisarlo."
+                )
+            líneas = [
+                f"- evento_id={c['evento_id']} | {c['servicio']} | {c['cuando']}"
+                for c in citas
+            ]
+            return (
+                "Citas próximas de esta clienta (NO le muestres los evento_id, son internos):\n"
+                + "\n".join(líneas)
+            )
+
+        if nombre == "cancelar_cita":
+            res = await asyncio.to_thread(
+                calendar_tool.cancelar_cita, (args.get("evento_id") or "").strip(), telefono or ""
+            )
+            if res.get("ok"):
+                cuando = res.get("cuando", "")
+                return (
+                    f"CITA CANCELADA{(' (' + cuando + ')') if cuando else ''}. "
+                    "Confírmale con calidez que su cita quedó cancelada y ofrécele reagendar "
+                    "cuando quiera."
+                )
+            return (
+                f"NO se pudo cancelar: {res.get('error', 'error desconocido')}. "
+                "Discúlpate con calidez y ofrece pasar con el equipo."
             )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error en herramienta {nombre}: {e}")
