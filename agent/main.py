@@ -11,7 +11,7 @@ import logging
 import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
-from datetime import datetime, time
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -28,6 +28,7 @@ from agent.memory import (
     marcar_evento_procesado,
     obtener_historial,
     registrar_inbound_lead,
+    reporte_leads,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -60,12 +61,34 @@ PORT = int(os.getenv("PORT", "8000"))
 # Zona horaria de Pachuca. Railway corre en UTC, por eso convertimos explícito.
 TZ_NEGOCIO = ZoneInfo("America/Mexico_City")
 
+# ── Días especiales (excepciones puntuales al horario normal) ───────────────
+# El equipo humano cambia su horario en fechas sueltas (feriados, medio día, etc.).
+# En estas fechas se ignora el horario semanal de abajo y se usa esta franja.
+#   valor = (inicio, fin) que atiende el equipo humano ese día → Sofía responde el resto
+#   valor = None          → el equipo NO trabaja ese día → Sofía responde 24h
+# Fuera de estas fechas, todo vuelve al horario normal de abajo automáticamente.
+DIAS_ESPECIALES: dict[date, tuple[time, time] | None] = {
+    date(2026, 9, 15): (time(8, 0), time(16, 0)),  # hoy: equipo solo 08:00-16:00, Sofía desde las 4pm
+    date(2026, 9, 16): None,                        # mañana: nadie del equipo trabaja, Sofía 24h
+}
+
 
 def sofia_debe_responder(ahora: datetime | None = None) -> bool:
     """True si Sofía debe auto-responder ahora (fuera del horario del equipo humano)."""
     ahora = ahora or datetime.now(TZ_NEGOCIO)
-    dow = ahora.weekday()  # 0=Lun ... 5=Sáb, 6=Dom
     t = ahora.time()
+
+    # Excepción puntual del día (tiene prioridad sobre el horario semanal).
+    if ahora.date() in DIAS_ESPECIALES:
+        franja = DIAS_ESPECIALES[ahora.date()]
+        if franja is None:
+            equipo_atiende = False  # el equipo no trabaja: Sofía responde todo el día
+        else:
+            inicio, fin = franja
+            equipo_atiende = inicio <= t < fin
+        return not equipo_atiende
+
+    dow = ahora.weekday()  # 0=Lun ... 5=Sáb, 6=Dom
 
     if dow <= 4:  # Lunes a Viernes: el equipo atiende 08:00-20:30
         equipo_atiende = time(8, 0) <= t < time(20, 30)
@@ -135,6 +158,15 @@ async def health_check():
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
     }
+
+
+@app.get("/leads")
+async def leads_report(key: str = ""):
+    """Reporte de leads (tibios/agendaron/opt-out) para el equipo. Protegido con clave."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    return await reporte_leads()
 
 
 @app.get("/webhook")

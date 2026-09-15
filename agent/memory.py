@@ -323,3 +323,35 @@ async def resumen_leads() -> dict:
         estados = [x for (x,) in r.all()]
     from collections import Counter
     return dict(Counter(estados))
+
+
+async def reporte_leads() -> dict:
+    """
+    Reporte completo de leads para el panel/endpoint /leads.
+    'tibios' = activos que aún no agendan (candidatos a seguimiento).
+    """
+    async with async_session() as s:
+        r = await s.execute(select(Lead).order_by(Lead.last_inbound.desc()))
+        leads = list(r.scalars().all())
+
+    def _d(l: "Lead") -> dict:
+        return {
+            "telefono": l.telefono,
+            "nombre": l.nombre or "",
+            "interes": l.interes or "",
+            "estado": l.estado,
+            "etapa_seguimiento": l.etapa_seguimiento,
+            "ultimo_mensaje": l.last_inbound.isoformat() if l.last_inbound else None,
+            "proximo_seguimiento": (
+                l.proximo_seguimiento.isoformat() if l.proximo_seguimiento else None
+            ),
+        }
+
+    from collections import Counter
+    return {
+        "total": len(leads),
+        "resumen": dict(Counter(l.estado for l in leads)),
+        "tibios": [_d(l) for l in leads if l.estado == "activo"],
+        "agendaron": [_d(l) for l in leads if l.estado == "agendado"],
+        "opt_out": [_d(l) for l in leads if l.estado == "opt_out"],
+    }
