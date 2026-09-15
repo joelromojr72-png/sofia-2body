@@ -144,6 +144,47 @@ class ProveedorMeta(ProveedorWhatsApp):
         logger.error(f"Meta rechazo el envio [{r.status_code}]: {r.text[:500]}")
         return False
 
+    # -- Plantillas (seguimiento fuera de la ventana de 24 h) -------------
+
+    async def enviar_plantilla(
+        self, telefono: str, template_name: str, params: list[str] | None = None,
+        lang: str = "es_MX",
+    ) -> bool:
+        """
+        Envia una PLANTILLA aprobada por Meta. Fuera de las 24 h desde el ultimo mensaje
+        del cliente, WhatsApp SOLO permite plantillas. `params` llena las variables {{1}},
+        {{2}}... del cuerpo, en orden.
+        """
+        if not self.access_token or not self.phone_number_id:
+            logger.error("No se puede enviar plantilla: faltan credenciales de Meta")
+            return False
+
+        template: dict = {"name": template_name, "language": {"code": lang}}
+        if params:
+            template["components"] = [
+                {"type": "body",
+                 "parameters": [{"type": "text", "text": str(p)} for p in params]}
+            ]
+
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as cliente:
+                r = await cliente.post(
+                    url,
+                    json={"messaging_product": "whatsapp", "to": telefono,
+                          "type": "template", "template": template},
+                    headers={"Authorization": f"Bearer {self.access_token}",
+                             "Content-Type": "application/json"},
+                )
+        except httpx.HTTPError as e:
+            logger.error(f"Error de red enviando plantilla: {e}")
+            return False
+
+        if r.status_code == 200:
+            return True
+        logger.error(f"Meta rechazo la plantilla [{r.status_code}]: {r.text[:400]}")
+        return False
+
     # -- Diagnostico ------------------------------------------------------
 
     async def verificar_conexion(self) -> tuple[bool, str]:
