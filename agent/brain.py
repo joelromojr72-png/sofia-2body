@@ -21,7 +21,7 @@ import yaml
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
-from agent import calendar_tool
+from agent import calendar_tool, memory
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
@@ -263,6 +263,16 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                 args.get("notas", ""),
             )
             if res.get("ok"):
+                # Ya cerró: apagar el seguimiento y guardar sus datos.
+                try:
+                    await memory.marcar_lead_agendado(telefono)
+                    await memory.actualizar_lead(
+                        telefono,
+                        nombre=args.get("nombre", "").strip(),
+                        interes=args.get("servicio", "").strip(),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 return (
                     f"CITA CREADA para {res['cuando']} (queda por confirmar). "
                     "Confírmale a la clienta con calidez que ya apartaste su espacio y que "

@@ -78,6 +78,37 @@ class EventoProcesado(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, index=True)
 
 
+class Lead(Base):
+    """
+    Un prospecto para SEGUIMIENTO de ventas.
+
+    Sofía usa esto para reactivar a quien mostró interés pero no agendó, aun días después.
+    Ojo: fuera de 24 h WhatsApp exige plantilla aprobada, por eso el envío real de
+    seguimiento usa plantillas (ver agent/followup.py).
+
+    estado: 'activo' (en juego) · 'agendado' (ya cerró, no molestar) · 'opt_out' (pidió no más)
+    """
+
+    __tablename__ = "leads"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    nombre: Mapped[str] = mapped_column(String(120), default="")
+    interes: Mapped[str] = mapped_column(String(200), default="")
+    estado: Mapped[str] = mapped_column(String(20), default="activo", index=True)
+    etapa_seguimiento: Mapped[int] = mapped_column(Integer, default=0)  # cuántos seguimientos enviados
+    last_inbound: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, index=True)
+    last_outbound: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    proximo_seguimiento: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+# Cadencia de seguimiento (horas desde el último mensaje del cliente) por etapa.
+# 3 toques máximo, con clase: +24 h, +3 días, +7 días. Más que esto arriesga el número.
+_CADENCIA_HORAS = [24, 72, 168]
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     async with engine.begin() as conn:
@@ -169,3 +200,126 @@ async def limpiar_historial(telefono: str):
     async with async_session() as session:
         await session.execute(delete(Mensaje).where(Mensaje.telefono == telefono))
         await session.commit()
+
+
+# ─────────────────────────── Seguimiento de leads ───────────────────────────
+
+# Frases que significan "no me sigan escribiendo". Conservadoras para no marcar opt-out
+# por error a media conversación.
+_OPT_OUT_KEYS = (
+    "no me interesa", "no me escriban", "no me manden", "dejen de escribir",
+    "dejen de molestar", "ya no me escriban", "date de baja", "darme de baja", "stop",
+)
+
+
+async def registrar_inbound_lead(telefono: str, texto: str = "") -> None:
+    """
+    Registra que un cliente escribió: crea/actualiza su lead, reinicia la cadencia de
+    seguimiento (primer toque a +24 h del último mensaje) y detecta opt-out.
+    """
+    if not telefono:
+        return
+    t = (texto or "").lower()
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            lead = Lead(telefono=telefono, creado_en=ahora())
+            s.add(lead)
+        if any(k in t for k in _OPT_OUT_KEYS):
+            lead.estado = "opt_out"
+            lead.proximo_seguimiento = None
+        elif lead.estado != "opt_out":
+            lead.estado = "activo"
+            lead.last_inbound = ahora()
+            lead.etapa_seguimiento = 0
+            lead.proximo_seguimiento = ahora() + timedelta(hours=_CADENCIA_HORAS[0])
+        await s.commit()
+
+
+async def actualizar_lead(telefono: str, nombre: str = "", interes: str = "") -> None:
+    """Guarda el nombre/servicio de interés del lead (para personalizar el seguimiento)."""
+    if not telefono:
+        return
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            return
+        if nombre and not lead.nombre:
+            lead.nombre = nombre[:120]
+        if interes:
+            lead.interes = interes[:200]
+        await s.commit()
+
+
+async def marcar_lead_agendado(telefono: str) -> None:
+    """La clienta agendó: se apaga el seguimiento (no molestar a quien ya cerró)."""
+    if not telefono:
+        return
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            lead = Lead(telefono=telefono, creado_en=ahora())
+            s.add(lead)
+        lead.estado = "agendado"
+        lead.proximo_seguimiento = None
+        await s.commit()
+
+
+async def marcar_lead_opt_out(telefono: str) -> None:
+    """Marca que el lead ya no quiere seguimiento."""
+    if not telefono:
+        return
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            return
+        lead.estado = "opt_out"
+        lead.proximo_seguimiento = None
+        await s.commit()
+
+
+async def leads_para_seguimiento(limite: int = 40) -> list[dict]:
+    """Leads activos cuyo próximo seguimiento ya venció y aún les quedan toques."""
+    async with async_session() as s:
+        r = await s.execute(
+            select(Lead)
+            .where(
+                Lead.estado == "activo",
+                Lead.proximo_seguimiento.is_not(None),
+                Lead.proximo_seguimiento <= ahora(),
+                Lead.etapa_seguimiento < len(_CADENCIA_HORAS),
+            )
+            .order_by(Lead.proximo_seguimiento)
+            .limit(limite)
+        )
+        leads = list(r.scalars().all())
+    return [
+        {"telefono": l.telefono, "nombre": l.nombre, "interes": l.interes,
+         "etapa": l.etapa_seguimiento}
+        for l in leads
+    ]
+
+
+async def registrar_seguimiento_enviado(telefono: str) -> None:
+    """Avanza la etapa tras enviar un seguimiento y programa el siguiente toque (o lo detiene)."""
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            return
+        lead.etapa_seguimiento += 1
+        lead.last_outbound = ahora()
+        if lead.etapa_seguimiento < len(_CADENCIA_HORAS):
+            base = lead.last_inbound or ahora()
+            lead.proximo_seguimiento = base + timedelta(hours=_CADENCIA_HORAS[lead.etapa_seguimiento])
+        else:
+            lead.proximo_seguimiento = None  # se agotaron los toques
+        await s.commit()
+
+
+async def resumen_leads() -> dict:
+    """Conteo rápido de leads por estado (para reportes)."""
+    async with async_session() as s:
+        r = await s.execute(select(Lead.estado))
+        estados = [x for (x,) in r.all()]
+    from collections import Counter
+    return dict(Counter(estados))

@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
+from agent import followup
 from agent.brain import generar_respuesta, obtener_mensaje_error
 from agent.memory import (
     guardar_mensaje,
@@ -26,6 +27,7 @@ from agent.memory import (
     limpiar_eventos_viejos,
     marcar_evento_procesado,
     obtener_historial,
+    registrar_inbound_lead,
 )
 from agent.providers import obtener_proveedor
 from agent.providers.base import MensajeEntrante
@@ -108,6 +110,8 @@ async def lifespan(app: FastAPI):
         ok, detalle = await proveedor.verificar_conexion()
         estado_proveedor = {"ok": ok, "detalle": detalle}
         logger.info(f"Conexion con el proveedor: {'OK' if ok else 'ERROR'} — {detalle}")
+        # Motor de seguimiento multi-día (dormido salvo FOLLOWUP_ENABLED=true).
+        asyncio.create_task(followup.loop_seguimiento(proveedor))
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
 
@@ -211,6 +215,10 @@ async def procesar_mensaje(msg: MensajeEntrante):
 
     async with _candados[msg.telefono]:
         try:
+            # Registrar/actualizar el lead para el seguimiento (reinicia la cadencia y
+            # detecta opt-out). Si luego agenda, brain.py lo marca como 'agendado'.
+            await registrar_inbound_lead(msg.telefono, msg.texto)
+
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
             historial = await obtener_historial(msg.telefono)
