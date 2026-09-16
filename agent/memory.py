@@ -236,6 +236,49 @@ async def limpiar_historial(telefono: str):
         await session.commit()
 
 
+async def ultimas_conversaciones(
+    max_convos: int = 10, max_msgs: int = 14, solo_whatsapp: bool = False
+) -> list[dict]:
+    """
+    Conversaciones más recientes con sus últimos mensajes (para revisión del dueño).
+    Agrupa por teléfono, de la más reciente a la más vieja. `solo_whatsapp=True` excluye
+    las de Messenger (las que llevan el prefijo 'msgr:').
+    """
+    async with async_session() as session:
+        resultado = await session.execute(
+            select(Mensaje).order_by(Mensaje.id.desc()).limit(600)
+        )
+        mensajes = list(resultado.scalars().all())
+
+    convos: dict[str, list] = {}
+    orden: list[str] = []
+    for m in mensajes:  # del más nuevo al más viejo
+        if solo_whatsapp and m.telefono.startswith("msgr:"):
+            continue
+        if m.telefono not in convos:
+            if len(orden) >= max_convos:
+                continue
+            convos[m.telefono] = []
+            orden.append(m.telefono)
+        if len(convos[m.telefono]) < max_msgs:
+            convos[m.telefono].append(
+                {
+                    "role": m.role,
+                    "content": m.content,
+                    "ts": m.timestamp.isoformat() if m.timestamp else None,
+                }
+            )
+
+    return [
+        {
+            "telefono": tel,
+            "canal": "messenger" if tel.startswith("msgr:") else "whatsapp",
+            "mensajes": list(reversed(convos[tel])),  # cronológico
+        }
+        for tel in orden
+    ]
+
+
 # ─────────────────────────── Seguimiento de leads ───────────────────────────
 
 # Frases que significan "no me sigan escribiendo". Conservadoras para no marcar opt-out

@@ -29,6 +29,7 @@ from agent.memory import (
     obtener_historial,
     registrar_inbound_lead,
     reporte_leads,
+    ultimas_conversaciones,
 )
 from agent.providers import obtener_proveedor, obtener_proveedor_messenger
 from agent.providers.base import MensajeEntrante
@@ -194,6 +195,15 @@ async def leads_report(key: str = ""):
     if not clave or key != clave:
         raise HTTPException(status_code=403, detail="clave invalida")
     return await reporte_leads()
+
+
+@app.get("/mensajes")
+async def mensajes_report(key: str = "", canal: str = "todos"):
+    """Últimas conversaciones (para el dueño). Protegido con clave. canal=whatsapp|todos."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    return await ultimas_conversaciones(solo_whatsapp=(canal == "whatsapp"))
 
 
 @app.get("/webhook")
