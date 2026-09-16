@@ -198,12 +198,21 @@ async def leads_report(key: str = ""):
 
 
 @app.get("/mensajes")
-async def mensajes_report(key: str = "", canal: str = "todos"):
-    """Últimas conversaciones (para el dueño). Protegido con clave. canal=whatsapp|todos."""
+async def mensajes_report(key: str = "", canal: str = "todos", n: int = 10, tel: str = ""):
+    """
+    Últimas conversaciones (para el dueño). Protegido con clave.
+    canal=whatsapp|todos · n=cuántas conversaciones · tel=fragmentos de teléfono separados
+    por coma (para ver casos concretos, p.ej. tel=6708,9661).
+    """
     clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
     if not clave or key != clave:
         raise HTTPException(status_code=403, detail="clave invalida")
-    return await ultimas_conversaciones(solo_whatsapp=(canal == "whatsapp"))
+    filtro = [t.strip() for t in tel.split(",") if t.strip()] or None
+    return await ultimas_conversaciones(
+        max_convos=max(1, min(n, 50)),
+        solo_whatsapp=(canal == "whatsapp"),
+        filtro_tel=filtro,
+    )
 
 
 @app.get("/webhook")

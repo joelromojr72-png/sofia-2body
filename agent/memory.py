@@ -237,16 +237,23 @@ async def limpiar_historial(telefono: str):
 
 
 async def ultimas_conversaciones(
-    max_convos: int = 10, max_msgs: int = 14, solo_whatsapp: bool = False
+    max_convos: int = 10,
+    max_msgs: int = 40,
+    solo_whatsapp: bool = False,
+    filtro_tel: list[str] | None = None,
 ) -> list[dict]:
     """
     Conversaciones más recientes con sus últimos mensajes (para revisión del dueño).
     Agrupa por teléfono, de la más reciente a la más vieja. `solo_whatsapp=True` excluye
-    las de Messenger (las que llevan el prefijo 'msgr:').
+    las de Messenger (prefijo 'msgr:'). `filtro_tel` = lista de fragmentos de teléfono; si
+    se da, solo trae las conversaciones cuyo teléfono contenga alguno (para ver un caso).
     """
+    # Si filtramos por teléfonos concretos, escaneamos una ventana más grande para
+    # alcanzar conversaciones más viejas.
+    ventana = 3000 if filtro_tel else 800
     async with async_session() as session:
         resultado = await session.execute(
-            select(Mensaje).order_by(Mensaje.id.desc()).limit(600)
+            select(Mensaje).order_by(Mensaje.id.desc()).limit(ventana)
         )
         mensajes = list(resultado.scalars().all())
 
@@ -254,6 +261,8 @@ async def ultimas_conversaciones(
     orden: list[str] = []
     for m in mensajes:  # del más nuevo al más viejo
         if solo_whatsapp and m.telefono.startswith("msgr:"):
+            continue
+        if filtro_tel and not any(f in m.telefono for f in filtro_tel):
             continue
         if m.telefono not in convos:
             if len(orden) >= max_convos:
