@@ -199,6 +199,65 @@ def citas_del_dia(fecha: date) -> list[dict]:
     return citas
 
 
+def citas_para_confirmar(fecha: date) -> list[dict]:
+    """
+    Citas de un día con los datos necesarios para mandar la confirmación por WhatsApp:
+    teléfono, nombre, servicio y hora. Saca el teléfono/nombre/servicio de la descripción
+    del evento (como los guarda crear_cita). Ignora eventos sin teléfono o de día completo.
+
+    Cada item: {"evento_id", "telefono", "nombre", "servicio", "cuando", "hora"}.
+    """
+    import re
+
+    svc = _obtener_servicio()
+    if not svc:
+        return []
+    inicio = datetime.combine(fecha, time(0, 0), tzinfo=TZ)
+    fin = inicio + timedelta(days=1)
+    try:
+        resp = (
+            svc.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                timeMin=inicio.isoformat(),
+                timeMax=fin.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error leyendo citas para confirmar: {e}")
+        return []
+
+    out = []
+    for ev in resp.get("items", []):
+        ini = ev.get("start", {}).get("dateTime")
+        if not ini:
+            continue  # eventos de día completo se ignoran
+        desc = ev.get("description", "") or ""
+        m_tel = re.search(r"WhatsApp:\s*\+?([0-9]{8,15})", desc)
+        if not m_tel:
+            continue  # sin teléfono no se puede confirmar (ej. evento manual del equipo)
+        m_serv = re.search(r"Servicio:\s*(.+)", desc)
+        m_nom = re.search(r"Cliente:\s*(.+)", desc)
+        try:
+            di = datetime.fromisoformat(ini).astimezone(TZ)
+        except ValueError:
+            continue
+        out.append(
+            {
+                "evento_id": ev.get("id", ""),
+                "telefono": m_tel.group(1),
+                "nombre": (m_nom.group(1).strip() if m_nom else ""),
+                "servicio": (m_serv.group(1).strip() if m_serv else ev.get("summary", "tu cita")),
+                "cuando": f"{_DIAS[di.weekday()]} {di.day} a las {di.strftime('%H:%M')}",
+                "hora": di.strftime("%H:%M"),
+            }
+        )
+    return out
+
+
 def crear_cita(
     nombre: str,
     telefono: str,

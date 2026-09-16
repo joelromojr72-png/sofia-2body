@@ -122,26 +122,109 @@ async def _ciclo(proveedor) -> int:
     return enviados
 
 
+# ─────────────────── Confirmación de citas (el día antes) ───────────────────
+
+
+def _confirm_habilitado() -> bool:
+    return os.getenv("CONFIRM_CITAS_ENABLED", "").strip().lower() in ("1", "true", "si", "yes", "on")
+
+
+def _confirm_template() -> str:
+    return os.getenv("CONFIRM_TEMPLATE") or "confirmacion_cita"
+
+
+def _debe_confirmar_ahora(now: datetime | None = None) -> bool:
+    """
+    Manda confirmaciones SOLO en horario en que Sofía responde (fuera del horario del
+    equipo) y a una hora sensata (9-21h), para no escribir de madrugada.
+    """
+    now = now or datetime.now(TZ)
+    if not (9 <= now.hour < 21):
+        return False
+    try:
+        from agent.main import sofia_debe_responder  # import diferido (evita ciclo)
+
+        return sofia_debe_responder(now)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+async def _ciclo_confirmaciones(proveedor) -> int:
+    """
+    Manda por WhatsApp (plantilla aprobada) la confirmación de las citas de MAÑANA.
+    Deduplica por evento para no confirmar dos veces la misma cita.
+    """
+    from agent import memory  # import diferido
+
+    try:
+        from agent import calendar_tool
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"No se pudo cargar calendar_tool para confirmaciones: {e}")
+        return 0
+
+    template = _confirm_template()
+    lang = _lang()
+    manana = (datetime.now(TZ) + timedelta(days=1)).date()
+    try:
+        citas = calendar_tool.citas_para_confirmar(manana)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error leyendo citas de mañana para confirmar: {e}")
+        return 0
+
+    enviados = 0
+    for c in citas:
+        eid = c.get("evento_id")
+        tel = c.get("telefono")
+        if not eid or not tel:
+            continue
+        dkey = f"conf:{eid}"
+        # marcar_evento_procesado devuelve True solo la primera vez → así se manda 1 sola vez.
+        if not await memory.marcar_evento_procesado(dkey):
+            continue
+        primer_nombre = (c.get("nombre") or "").strip().split(" ")[0] or "hola"
+        params = [primer_nombre, c.get("servicio", "tu cita"), c.get("cuando", "")]
+        try:
+            ok = await proveedor.enviar_plantilla(tel, template, params, lang)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error enviando confirmación a {tel}: {e}")
+            ok = False
+        if ok:
+            enviados += 1
+            logger.info(f"Confirmación de cita enviada a {tel} para {c.get('cuando')}")
+        else:
+            await memory.liberar_evento(dkey)  # soltar para reintentar el próximo ciclo
+        await asyncio.sleep(1.5)
+    if enviados:
+        logger.info(f"Confirmaciones de cita enviadas este ciclo: {enviados}")
+    return enviados
+
+
 async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
     """Corre en segundo plano dentro del servidor. Revisa cada ~15 min."""
-    if not habilitado():
-        logger.info("Seguimiento multi-día DESACTIVADO (FOLLOWUP_ENABLED != true).")
+    if not habilitado() and not _confirm_habilitado():
+        logger.info("Seguimiento y confirmaciones DESACTIVADOS.")
         return
     if not hasattr(proveedor, "enviar_plantilla"):
-        logger.warning("El proveedor no soporta plantillas: seguimiento multi-día no disponible.")
+        logger.warning("El proveedor no soporta plantillas: seguimiento/confirmaciones no disponibles.")
         return
     logger.info(
         "Seguimiento ACTIVADO — toque de cierre 24h (9-21h) + multi-día por plantilla "
         "(+24h/+3d/+7d, 10-19h lun-sáb)."
+        + (" + confirmación de citas el día antes (horario de Sofía, 9-21h)."
+           if _confirm_habilitado() else "")
     )
     while True:
         try:
-            # 1) Toque de cierre dentro de 24 h (mensaje libre, no necesita plantilla).
-            if _en_horario_nudge():
-                await _ciclo_nudge(proveedor)
-            # 2) Seguimiento multi-día por plantilla aprobada (fuera de 24 h).
-            if _en_horario():
-                await _ciclo(proveedor)
+            if habilitado():
+                # 1) Toque de cierre dentro de 24 h (mensaje libre, no necesita plantilla).
+                if _en_horario_nudge():
+                    await _ciclo_nudge(proveedor)
+                # 2) Seguimiento multi-día por plantilla aprobada (fuera de 24 h).
+                if _en_horario():
+                    await _ciclo(proveedor)
+            # 3) Confirmación de las citas de mañana (plantilla), en horario de Sofía.
+            if _confirm_habilitado() and _debe_confirmar_ahora():
+                await _ciclo_confirmaciones(proveedor)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error en el ciclo de seguimiento: {e}")
         await asyncio.sleep(intervalo_seg)
