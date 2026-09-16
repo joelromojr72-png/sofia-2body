@@ -13,7 +13,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from sqlalchemy import DateTime, Integer, String, Text, delete, select
+from sqlalchemy import DateTime, Integer, String, Text, delete, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -101,6 +101,12 @@ class Lead(Base):
     proximo_seguimiento: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    # "Toque de cierre" DENTRO de la ventana de 24 h (mensaje libre, sin plantilla): cuándo
+    # mandarlo y si ya se mandó. Sirve para cerrar a quien dejó la charla a medias.
+    nudge_en: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    nudge_enviado: Mapped[bool] = mapped_column(default=False)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
@@ -108,11 +114,39 @@ class Lead(Base):
 # 3 toques máximo, con clase: +24 h, +3 días, +7 días. Más que esto arriesga el número.
 _CADENCIA_HORAS = [24, 72, 168]
 
+# "Toque de cierre" dentro de la ventana de 24 h: horas de silencio antes de reactivar.
+_NUDGE_HORAS = float(os.getenv("NUDGE_HORAS") or "3")
+
 
 async def inicializar_db():
-    """Crea las tablas si no existen."""
+    """Crea las tablas si no existen y aplica migraciones ligeras de columnas."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _migrar_columnas_nudge()
+
+
+async def _migrar_columnas_nudge():
+    """
+    Agrega las columnas del 'toque de cierre' a la tabla 'leads' si ya existía sin ellas.
+    create_all NO altera tablas existentes, por eso se hace a mano. Idempotente.
+    """
+    es_pg = engine.dialect.name == "postgresql"
+    if es_pg:
+        stmts = [
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_en TIMESTAMPTZ",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_enviado BOOLEAN DEFAULT FALSE",
+        ]
+    else:  # sqlite u otros: intentar agregar, ignorar si ya existe
+        stmts = [
+            "ALTER TABLE leads ADD COLUMN nudge_en TIMESTAMP",
+            "ALTER TABLE leads ADD COLUMN nudge_enviado BOOLEAN DEFAULT 0",
+        ]
+    for s in stmts:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(s))
+        except Exception as e:  # noqa: BLE001 — normal si la columna ya existe
+            logger.debug(f"migración columna (ok si ya existe): {e}")
 
 
 async def marcar_evento_procesado(evento_id: str) -> bool:
@@ -228,11 +262,20 @@ async def registrar_inbound_lead(telefono: str, texto: str = "") -> None:
         if any(k in t for k in _OPT_OUT_KEYS):
             lead.estado = "opt_out"
             lead.proximo_seguimiento = None
+            lead.nudge_en = None
         elif lead.estado != "opt_out":
+            # ¿Es una conversación NUEVA (pasaron horas desde el último mensaje)?
+            gap_grande = bool(
+                lead.last_inbound and (ahora() - lead.last_inbound) > timedelta(hours=8)
+            )
+            if gap_grande:
+                lead.nudge_enviado = False  # re-armar el toque para esta nueva charla
             lead.estado = "activo"
             lead.last_inbound = ahora()
             lead.etapa_seguimiento = 0
             lead.proximo_seguimiento = ahora() + timedelta(hours=_CADENCIA_HORAS[0])
+            # Programar el toque de cierre solo si aún no se mandó en esta charla.
+            lead.nudge_en = None if lead.nudge_enviado else ahora() + timedelta(hours=_NUDGE_HORAS)
         await s.commit()
 
 
@@ -313,6 +356,42 @@ async def registrar_seguimiento_enviado(telefono: str) -> None:
             lead.proximo_seguimiento = base + timedelta(hours=_CADENCIA_HORAS[lead.etapa_seguimiento])
         else:
             lead.proximo_seguimiento = None  # se agotaron los toques
+        await s.commit()
+
+
+async def leads_para_nudge(limite: int = 40) -> list[dict]:
+    """
+    Leads activos que dejaron la charla a medias y toca el 'toque de cierre' DENTRO de
+    las 24 h (mensaje libre, sin plantilla). Se excluye a quien ya agendó o pidió baja,
+    y a quien ya se le mandó el toque.
+    """
+    limite_ventana = ahora() - timedelta(hours=23)  # aún dentro de la ventana de 24 h
+    async with async_session() as s:
+        r = await s.execute(
+            select(Lead)
+            .where(
+                Lead.estado == "activo",
+                Lead.nudge_enviado.is_(False),
+                Lead.nudge_en.is_not(None),
+                Lead.nudge_en <= ahora(),
+                Lead.last_inbound >= limite_ventana,
+            )
+            .order_by(Lead.nudge_en)
+            .limit(limite)
+        )
+        leads = list(r.scalars().all())
+    return [{"telefono": l.telefono, "nombre": l.nombre, "interes": l.interes} for l in leads]
+
+
+async def marcar_nudge_enviado(telefono: str) -> None:
+    """Marca que ya se mandó el toque de cierre dentro de la ventana."""
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            return
+        lead.nudge_enviado = True
+        lead.nudge_en = None
+        lead.last_outbound = ahora()
         await s.commit()
 
 

@@ -421,3 +421,31 @@ async def generar_respuesta(
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error llamando a Claude: {e}")
         return obtener_mensaje_error(), False
+
+
+async def generar_seguimiento(historial: list[dict]) -> str | None:
+    """
+    Redacta UN mensaje de reenganche (toque de cierre) para una clienta que dejó la charla
+    a medias, usando la personalidad cerradora + el historial. Devuelve el texto o None.
+    """
+    if not historial:
+        return None
+    system_prompt = cargar_system_prompt() + _contexto_temporal()
+    instruccion = (
+        "[NOTA INTERNA — no la menciones: la clienta dejó de responder hace unas horas y "
+        "todavía no agenda. Escríbele UN solo mensaje corto, cálido y natural para retomar y "
+        "CERRAR: recuérdale con gancho el beneficio de lo que le interesó y propón agendar su "
+        "valoración sin costo con un día y hora concretos. No la regañes por no contestar ni la "
+        "satures; suena como alguien que da seguimiento con clase. Máx 3 renglones, 1 emoji.]"
+    )
+    mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
+    mensajes.append({"role": "user", "content": instruccion})
+    try:
+        r = await client.messages.create(
+            model=MODELO, max_tokens=600, system=system_prompt, messages=mensajes
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error generando seguimiento: {e}")
+        return None
+    texto = _extraer_texto(r)
+    return texto or None
