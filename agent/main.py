@@ -30,7 +30,7 @@ from agent.memory import (
     registrar_inbound_lead,
     reporte_leads,
 )
-from agent.providers import obtener_proveedor
+from agent.providers import obtener_proveedor, obtener_proveedor_messenger
 from agent.providers.base import MensajeEntrante
 
 load_dotenv()
@@ -118,6 +118,17 @@ except Exception as e:  # noqa: BLE001 — cualquier problema de configuracion
 # check: que el servidor conteste no significa que el agente pueda responder por WhatsApp.
 estado_proveedor: dict = {"ok": None, "detalle": "sin verificar"}
 
+# ── Canal EXTRA: Facebook Messenger ─────────────────────────────────────────
+# Convive con WhatsApp (no lo reemplaza). Se activa solo si hay Page Access Token.
+# Comparte el mismo cerebro (Claude), memoria y calendario que WhatsApp.
+proveedor_messenger = obtener_proveedor_messenger()
+estado_messenger: dict = {"ok": None, "detalle": "sin configurar"}
+
+# En Messenger, por defecto Sofía responde 24/7 (canal nuevo, sin equipo humano vigilando
+# la bandeja de la página). Pon MESSENGER_RESPETA_HORARIO=true si quieres que respete el
+# mismo horario de coexistencia que WhatsApp (callada mientras atiende el equipo).
+MESSENGER_RESPETA_HORARIO = os.getenv("MESSENGER_RESPETA_HORARIO", "false").strip().lower() == "true"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -134,9 +145,20 @@ async def lifespan(app: FastAPI):
         estado_proveedor = {"ok": ok, "detalle": detalle}
         logger.info(f"Conexion con el proveedor: {'OK' if ok else 'ERROR'} — {detalle}")
         # Motor de seguimiento multi-día (dormido salvo FOLLOWUP_ENABLED=true).
+        # Solo WhatsApp: usa plantillas de Meta, que no existen en Messenger.
         asyncio.create_task(followup.loop_seguimiento(proveedor))
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
+
+    # Canal extra de Messenger (si está configurado).
+    global estado_messenger
+    if proveedor_messenger is not None:
+        ok_m, detalle_m = await proveedor_messenger.verificar_conexion()
+        estado_messenger = {"ok": ok_m, "detalle": detalle_m}
+        modo = "respeta horario de equipo" if MESSENGER_RESPETA_HORARIO else "24/7"
+        logger.info(f"Canal Messenger: {'OK' if ok_m else 'ERROR'} ({modo}) — {detalle_m}")
+    else:
+        logger.info("Canal Messenger: no configurado (falta MESSENGER_PAGE_ACCESS_TOKEN)")
 
     yield
 
@@ -157,6 +179,11 @@ async def health_check():
         "service": "agentkit",
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
+        "messenger": {
+            "activo": proveedor_messenger is not None,
+            "modo": "respeta_horario" if MESSENGER_RESPETA_HORARIO else "24/7",
+            "conexion": estado_messenger,
+        },
     }
 
 
@@ -187,34 +214,34 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
-@app.post("/webhook")
-async def webhook_handler(request: Request, tareas: BackgroundTasks):
+async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
     """
-    Recibe los mensajes de WhatsApp.
+    Lógica común de un webhook entrante, compartida por WhatsApp y Messenger.
 
-    Contesta 200 de inmediato y procesa el mensaje en segundo plano.
+    Contesta 200 de inmediato y procesa cada mensaje en segundo plano. Esto NO es un
+    detalle de estilo: los proveedores esperan un 2xx en unos 5 segundos y, si no lo
+    reciben, reintentan el mismo evento hasta 7 veces. Por eso: responder primero,
+    trabajar después, y deduplicar por id de evento.
 
-    Esto NO es un detalle de estilo. Los proveedores esperan un 2xx en unos 5 segundos y,
-    si no lo reciben, reintentan el mismo evento hasta 7 veces. Como llamar a Claude tarda
-    mas que eso, procesar antes de contestar hace que el cliente reciba la misma respuesta
-    repetida. Por eso: responder primero, trabajar despues.
+    `aplicar_horario`: True en WhatsApp (Sofía se calla mientras atiende el equipo);
+    en Messenger normalmente False (responde 24/7).
     """
-    if proveedor is None:
-        raise HTTPException(status_code=503, detail=error_configuracion or "Proveedor no configurado")
+    if prov is None:
+        raise HTTPException(status_code=503, detail="Canal no configurado")
 
-    if not await proveedor.verificar_firma(request):
+    if not await prov.verificar_firma(request):
         raise HTTPException(status_code=401, detail="Firma del webhook invalida")
 
     try:
-        mensajes = await proveedor.parsear_webhook(request)
+        mensajes = await prov.parsear_webhook(request)
     except Exception as e:  # noqa: BLE001
         # Un payload raro no debe hacer que el proveedor reintente para siempre
         logger.error(f"No se pudo leer el webhook: {e}")
         return {"status": "ignorado"}
 
     # Horario de respuesta: dentro del horario del equipo humano, Sofía se calla y
-    # deja que el equipo atienda desde la app de WhatsApp (coexistencia).
-    if not sofia_debe_responder():
+    # deja que el equipo atienda (coexistencia). Solo aplica al canal que lo pida.
+    if aplicar_horario and not sofia_debe_responder():
         logger.info("Dentro del horario del equipo; Sofía no responde (atiende el equipo).")
         return {"status": "ok", "encolados": 0, "motivo": "horario_equipo"}
 
@@ -230,26 +257,68 @@ async def webhook_handler(request: Request, tareas: BackgroundTasks):
             continue
 
         logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
-        tareas.add_task(procesar_mensaje, msg)
+        tareas.add_task(procesar_mensaje, msg, prov)
         encolados += 1
 
     return {"status": "ok", "encolados": encolados}
 
 
-async def procesar_mensaje(msg: MensajeEntrante):
+@app.post("/webhook")
+async def webhook_handler(request: Request, tareas: BackgroundTasks):
+    """Webhook de WhatsApp (Meta Cloud API). Respeta el horario del equipo humano."""
+    if proveedor is None:
+        raise HTTPException(status_code=503, detail=error_configuracion or "Proveedor no configurado")
+    return await _procesar_entrantes(request, tareas, proveedor, aplicar_horario=True)
+
+
+@app.get("/webhook/messenger")
+async def messenger_verificacion(request: Request):
     """
-    Genera la respuesta y la manda de vuelta. Corre fuera del ciclo del webhook.
+    Verificación GET del webhook de Messenger (Meta manda hub.challenge).
+
+    NO depende de que el Page Access Token ya esté puesto: valida el verify token
+    directo del entorno. Así se puede verificar la URL en Meta ANTES de generar el
+    token de la página (evita el problema del huevo y la gallina).
+    """
+    params = request.query_params
+    verify_token = (
+        os.getenv("MESSENGER_VERIFY_TOKEN")
+        or os.getenv("META_VERIFY_TOKEN")
+        or "agentkit-verify"
+    )
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == verify_token:
+        return PlainTextResponse(params.get("hub.challenge") or "")
+    if params.get("hub.mode") == "subscribe":
+        raise HTTPException(status_code=403, detail="Verify token incorrecto")
+    return {"status": "ok"}
+
+
+@app.post("/webhook/messenger")
+async def messenger_handler(request: Request, tareas: BackgroundTasks):
+    """Webhook de Facebook Messenger. Por defecto responde 24/7 (ver MESSENGER_RESPETA_HORARIO)."""
+    return await _procesar_entrantes(
+        request, tareas, proveedor_messenger, aplicar_horario=MESSENGER_RESPETA_HORARIO
+    )
+
+
+async def procesar_mensaje(msg: MensajeEntrante, prov):
+    """
+    Genera la respuesta y la manda de vuelta por `prov`. Corre fuera del ciclo del webhook.
 
     Se toma un candado por telefono: dos mensajes seguidos del mismo cliente se
     atienden en orden, no en paralelo, para que el historial no se mezcle.
     """
     evento_id = msg.contexto.get("evento_id") or msg.mensaje_id
+    es_messenger = msg.telefono.startswith("msgr:")
 
     async with _candados[msg.telefono]:
         try:
             # Registrar/actualizar el lead para el seguimiento (reinicia la cadencia y
-            # detecta opt-out). Si luego agenda, brain.py lo marca como 'agendado'.
-            await registrar_inbound_lead(msg.telefono, msg.texto)
+            # detecta opt-out). Solo WhatsApp: el motor de seguimiento manda plantillas de
+            # Meta, que no existen en Messenger; registrar un PSID ahí haría que intentara
+            # enviarle una plantilla de WhatsApp a un id que no es un teléfono.
+            if not es_messenger:
+                await registrar_inbound_lead(msg.telefono, msg.texto)
 
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
@@ -258,7 +327,7 @@ async def procesar_mensaje(msg: MensajeEntrante):
                 msg.texto, historial, msg.telefono
             )
 
-            enviado = await proveedor.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+            enviado = await prov.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 
             if not enviado:
                 # El evento se marco como procesado ANTES de llegar hasta aca, para que dos
@@ -282,6 +351,6 @@ async def procesar_mensaje(msg: MensajeEntrante):
             logger.exception(f"Error procesando el mensaje de {msg.telefono}: {e}")
             await liberar_evento(evento_id)
             try:
-                await proveedor.enviar_mensaje(msg.telefono, obtener_mensaje_error(), msg.contexto)
+                await prov.enviar_mensaje(msg.telefono, obtener_mensaje_error(), msg.contexto)
             except Exception:  # noqa: BLE001
                 logger.error("Tampoco se pudo avisarle al cliente del error")

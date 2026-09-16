@@ -44,9 +44,25 @@ def obtener_proveedor() -> ProveedorWhatsApp:
     )
 
 
+def obtener_proveedor_messenger():
+    """
+    Devuelve el proveedor de Facebook Messenger si está configurado, o None.
+
+    Messenger es un canal EXTRA (no reemplaza a WhatsApp): convive con el proveedor
+    principal. Se activa con solo poner MESSENGER_PAGE_ACCESS_TOKEN en el entorno.
+    """
+    if not os.getenv("MESSENGER_PAGE_ACCESS_TOKEN"):
+        return None
+
+    from agent.providers.messenger import ProveedorMessenger
+
+    return ProveedorMessenger()
+
+
 __all__ = [
     "MensajeEntrante",
     "ProveedorWhatsApp",
     "PROVEEDORES_SOPORTADOS",
     "obtener_proveedor",
+    "obtener_proveedor_messenger",
 ]
