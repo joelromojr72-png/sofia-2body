@@ -103,13 +103,26 @@ class ProveedorMessenger(ProveedorWhatsApp):
             return False
         return True
 
+    @staticmethod
+    def _texto_desde_referral(referral: dict) -> str:
+        """
+        Turno sintético para cuando alguien llega desde un ANUNCIO (Click-to-Messenger)
+        y abre el chat sin escribir todavía. Le damos a Sofía un "Hola vengo del anuncio"
+        para que salude y arranque a calificar, como haría con cualquier cliente nuevo.
+        """
+        return "Hola, vengo del anuncio de 2Body y quiero información"
+
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
         """
         Normaliza el payload de Messenger.
 
-        Estructura: object="page", entry[].messaging[] con sender.id (PSID del cliente),
-        message.text y message.mid. Se ignoran los "echo" (mensajes que manda la propia
-        página) y los eventos que no son mensajes de texto (delivery, read, postback...).
+        Atiende tres tipos de entrada (en este orden de prioridad por evento):
+          1. message.text  → texto que escribió la persona (incluye los de ads con texto).
+          2. postback      → tocó un botón / ice-breaker / "Empezar" (muy común en los
+                             anuncios Click-to-Messenger): usamos el título del botón.
+          3. referral      → clic a un anuncio que abre el chat SIN texto ni botón:
+                             saludamos con un turno sintético para no dejarlo sin atención.
+        Se ignoran los "echo" (lo que manda la propia página) y delivery/read/stickers.
         """
         body = await request.json()
         mensajes: list[MensajeEntrante] = []
@@ -119,26 +132,43 @@ class ProveedorMessenger(ProveedorWhatsApp):
 
         for entry in body.get("entry", []):
             for evento in entry.get("messaging", []):
-                mensaje = evento.get("message")
-                if not mensaje:
-                    continue  # delivery, read, postback, etc.
-                if mensaje.get("is_echo"):
-                    continue  # lo mandó la propia página, no un cliente
-                texto = mensaje.get("text")
-                if not texto:
-                    continue  # por ahora solo texto (adjuntos/stickers se ignoran)
-
                 psid = (evento.get("sender") or {}).get("id", "")
                 if not psid:
                     continue
+
+                ts = evento.get("timestamp") or ""
+                mensaje = evento.get("message") or {}
+                postback = evento.get("postback") or {}
+                # El referral (info del anuncio) puede venir suelto o dentro del message/postback.
+                referral = (
+                    evento.get("referral")
+                    or mensaje.get("referral")
+                    or postback.get("referral")
+                )
+
+                if mensaje.get("is_echo"):
+                    continue  # lo mandó la propia página, no un cliente
+
+                # Prioridad: texto real > botón/postback > referral de anuncio.
+                if mensaje.get("text"):
+                    texto = mensaje["text"]
+                    evento_id = mensaje.get("mid") or f"msg:{psid}:{ts}"
+                elif postback:
+                    texto = postback.get("title") or postback.get("payload") or "Hola"
+                    evento_id = postback.get("mid") or f"pb:{psid}:{ts}"
+                elif referral:
+                    texto = self._texto_desde_referral(referral)
+                    evento_id = f"ref:{psid}:{ts}"
+                else:
+                    continue  # sticker/adjunto/delivery/read → se ignora
 
                 mensajes.append(
                     MensajeEntrante(
                         telefono=f"{PREFIJO_MSGR}{psid}",
                         texto=texto,
-                        mensaje_id=mensaje.get("mid", ""),
+                        mensaje_id=evento_id,
                         es_propio=False,
-                        contexto={"evento_id": mensaje.get("mid", ""), "psid": psid},
+                        contexto={"evento_id": evento_id, "psid": psid},
                     )
                 )
         return mensajes
