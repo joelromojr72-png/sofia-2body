@@ -188,26 +188,19 @@ class ProveedorMessenger(ProveedorWhatsApp):
 
     async def verificar_conexion(self) -> tuple[bool, str]:
         """
-        Confirma que el Page Token sirve para MENSAJERÍA.
+        Confirma que el Page Token de MENSAJERÍA está presente.
 
-        Ojo: /me?fields=name pediría el permiso pages_read_engagement (que no necesitamos
-        y que el token de mensajería no trae). En su lugar consultamos las apps suscritas
-        de la página, endpoint que funciona con pages_messaging y confirma que el webhook
-        quedó enganchado.
+        Ojo: un token con solo pages_messaging NO tiene permiso para los endpoints de
+        lectura de la Graph API (/me?fields=name pide pages_read_engagement; GET
+        /me/subscribed_apps pide pages_manage_metadata), así que cualquier GET de sondeo
+        daría un falso negativo. La capacidad real de ENVIAR se confirma con el primer
+        mensaje entrante (y ya se validó el token por separado con debug_token: válido,
+        permanente y con pages_messaging). Por eso aquí solo comprobamos que el token
+        esté configurado.
         """
         if not self.page_access_token:
             return False, "Falta MESSENGER_PAGE_ACCESS_TOKEN"
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as cliente:
-                r = await cliente.get(
-                    f"https://graph.facebook.com/{self.api_version}/me/subscribed_apps",
-                    params={"access_token": self.page_access_token},
-                )
-        except httpx.HTTPError as e:
-            return False, f"No se pudo contactar a Messenger: {e}"
-
-        if r.status_code != 200:
-            return False, f"Messenger respondió {r.status_code}: {r.text[:200]}"
-
-        return True, f"Página conectada (id {self.page_id or '?'}), token de mensajería OK"
+        return True, (
+            f"Page token de mensajería configurado (página id {self.page_id or '?'}); "
+            "el envío se confirma al primer mensaje"
+        )
