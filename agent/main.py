@@ -251,9 +251,7 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
 
     # Horario de respuesta: dentro del horario del equipo humano, Sofía se calla y
     # deja que el equipo atienda (coexistencia). Solo aplica al canal que lo pida.
-    if aplicar_horario and not sofia_debe_responder():
-        logger.info("Dentro del horario del equipo; Sofía no responde (atiende el equipo).")
-        return {"status": "ok", "encolados": 0, "motivo": "horario_equipo"}
+    en_horario_equipo = aplicar_horario and not sofia_debe_responder()
 
     encolados = 0
     for msg in mensajes:
@@ -266,11 +264,22 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
             logger.info(f"Evento repetido, se ignora: {evento_id}")
             continue
 
+        # En horario del equipo Sofía NO responde (atiende el equipo en vivo), PERO en
+        # WhatsApp registra el lead para que ENTRE al seguimiento y no se enfríe: si la
+        # clienta no agenda, el motor le manda un recordatorio (plantilla) pasadas 24 h,
+        # en horario de Sofía (10-19h). No contesta el mismo momento, así no se encima con
+        # la charla que el equipo esté teniendo en vivo.
+        if en_horario_equipo:
+            if not msg.telefono.startswith("msgr:"):
+                await registrar_inbound_lead(msg.telefono, msg.texto)
+            logger.info(f"[horario equipo] lead registrado (Sofía no responde): {msg.telefono}")
+            continue
+
         logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
         tareas.add_task(procesar_mensaje, msg, prov)
         encolados += 1
 
-    return {"status": "ok", "encolados": encolados}
+    return {"status": "ok", "encolados": encolados, "horario_equipo": en_horario_equipo}
 
 
 @app.post("/webhook")
