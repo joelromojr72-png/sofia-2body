@@ -64,9 +64,10 @@ HERRAMIENTAS = [
     {
         "name": "consultar_disponibilidad",
         "description": (
-            "Consulta el horario del spa y las citas ya ocupadas de un dia concreto, "
-            "para proponerle a la clienta horarios libres antes de agendar. Usala ANTES "
-            "de agendar cuando la clienta menciona un dia."
+            "Devuelve los HORARIOS LIBRES reales de un día (ya descontando las citas "
+            "ocupadas y el horario del spa). Úsala SIEMPRE antes de proponerle u ofrecerle "
+            "cualquier hora a la clienta: nunca ofrezcas una hora sin haberla consultado aquí. "
+            "Ofrécele solo horarios que esta herramienta marque libres."
         ),
         "input_schema": {
             "type": "object",
@@ -74,7 +75,11 @@ HERRAMIENTAS = [
                 "fecha": {
                     "type": "string",
                     "description": "Dia a consultar en formato YYYY-MM-DD.",
-                }
+                },
+                "duracion_min": {
+                    "type": "integer",
+                    "description": "Duración de la cita en minutos (si no sabes, usa 60).",
+                },
             },
             "required": ["fecha"],
         },
@@ -93,7 +98,7 @@ HERRAMIENTAS = [
                 "nombre": {"type": "string", "description": "Nombre de la clienta."},
                 "servicio": {
                     "type": "string",
-                    "description": "Servicio o tratamiento (o 'valoración').",
+                    "description": "Tratamiento o paquete que la clienta va a empezar.",
                 },
                 "fecha_hora": {
                     "type": "string",
@@ -133,6 +138,16 @@ HERRAMIENTAS = [
             },
             "required": ["evento_id"],
         },
+    },
+    {
+        "name": "cerrar_conversacion",
+        "description": (
+            "Apaga el seguimiento proactivo de esta clienta (no le volveremos a escribir hasta "
+            "que ella escriba). Úsala SOLO cuando la clienta declinó con amabilidad (dijo que no "
+            "por ahora, que lo pensará y ahí queda) y TÚ ya te despediste dejando la puerta "
+            "abierta. NO la uses si sigue interesada, dudando o haciendo preguntas."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -185,19 +200,29 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
     if hay_agenda:
         return (
             "\n\n## Agenda automática (tienes herramientas)\n"
-            "Puedes agendar DE VERDAD. Cuando la clienta quiera cita o valoración:\n"
-            "1) Reúne su nombre y el servicio (uno a la vez, con calidez).\n"
-            "2) Cuando mencione un día, usa `consultar_disponibilidad` y ofrécele 1-2 horarios "
-            "libres dentro del horario del spa.\n"
-            "3) Cuando ella acepte una hora concreta, llama `agendar_cita`.\n"
-            "4) Al confirmarse, dile que su espacio quedó apartado (por confirmar) y que el "
-            "equipo le confirma por aquí. Las valoraciones son sin costo y duran ~60 min.\n"
-            "No inventes horarios: siempre revisa con la herramienta. Si la herramienta falla, "
-            "toma la solicitud y dile que el equipo confirma.\n"
+            "Puedes agendar DE VERDAD. Vendes TRATAMIENTOS directo (no 'valoraciones'). Cuando la "
+            "clienta quiera empezar un tratamiento:\n"
+            "1) Pide solo lo indispensable: su nombre y qué tratamiento quiere. Si no lo dijo, "
+            "RECOMIÉNDALE el ideal en vez de preguntar de más. Una cosa a la vez, sin interrogar.\n"
+            "2) ANTES de proponer u ofrecer CUALQUIER hora, usa SIEMPRE "
+            "`consultar_disponibilidad` de ese día y ofrécele 1-2 horarios ÚNICAMENTE de los que "
+            "la herramienta marque libres. NUNCA ofrezcas, confirmes ni des por buena una hora sin "
+            "haberla verificado ahí: así no se empalman las citas.\n"
+            "3) Cuando ella acepte una hora concreta (de las libres), llama `agendar_cita` (en "
+            "'servicio' pon el tratamiento que va a empezar).\n"
+            "4) Al confirmarse, dile con calidez que su primera sesión quedó apartada (por "
+            "confirmar) y que el equipo le confirma por aquí. La primera sesión dura ~60 min.\n"
+            "No inventes horarios: siempre revisa con la herramienta. Si la herramienta te dice "
+            "que ese horario ya está ocupado, ofrece otra hora; si te dice que la clienta YA tenía "
+            "esa cita, NO agendes de nuevo, solo confírmasela. Si la herramienta falla, toma la "
+            "solicitud y dile que el equipo confirma.\n"
             "Para CANCELAR: usa `consultar_mis_citas` para ver sus citas; si tiene una sola, "
             "confirma con ella que esa quiere cancelar y usa `cancelar_cita`; si tiene varias, "
             "pregúntale cuál. Nunca canceles sin confirmar. Los evento_id son internos: no se "
-            "los muestres. Para REAGENDAR: cancela la anterior y agenda la nueva."
+            "los muestres. Para REAGENDAR: cancela la anterior y agenda la nueva.\n"
+            "Si la clienta declina con amabilidad (dice que no por ahora) y ya te despediste "
+            "dejando la puerta abierta, usa `cerrar_conversacion` para apagar su seguimiento; no "
+            "le volveremos a escribir hasta que ella escriba."
         )
     return (
         "\n\n## Agenda\n"
@@ -240,16 +265,21 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
             fecha = date.fromisoformat(args["fecha"])
             hd = calendar_tool.horario_dia(fecha)
             if hd is None:
-                return f"El {fecha.isoformat()} es domingo: el spa está cerrado."
-            citas = await asyncio.to_thread(calendar_tool.citas_del_dia, fecha)
+                return f"El {fecha.isoformat()} es domingo: el spa está cerrado. Ofrece otro día."
+            dur = int(args.get("duracion_min") or 60)
+            libres = await asyncio.to_thread(calendar_tool.slots_libres, fecha, dur)
             ap, ci = hd
-            base = (
-                f"Horario ese día: {ap.strftime('%H:%M')} a {ci.strftime('%H:%M')}. "
+            horario = f"Horario ese día: {ap.strftime('%H:%M')}-{ci.strftime('%H:%M')}. "
+            if not libres:
+                return (
+                    horario + "Ese día YA NO tiene huecos libres (todo ocupado o ya pasó la hora). "
+                    "Discúlpate con calidez y ofrécele otro día."
+                )
+            muestra = ", ".join(libres[:6])
+            return (
+                horario + f"HORARIOS LIBRES: {muestra}. Ofrécele 1-2 SOLO de estos (nunca una hora "
+                "que no esté en esta lista). Cuando elija, agenda con agendar_cita."
             )
-            if citas:
-                ocup = "; ".join(f"{c['inicio']}-{c['fin']}" for c in citas)
-                return base + f"Ya ocupado: {ocup}. Ofrece un hueco libre distinto."
-            return base + "No hay citas todavía ese día; casi cualquier hora sirve."
 
         if nombre == "agendar_cita":
             inicio = datetime.fromisoformat(args["fecha_hora"])
@@ -257,7 +287,7 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                 calendar_tool.crear_cita,
                 args.get("nombre", "").strip() or "Clienta",
                 telefono or "",
-                args.get("servicio", "").strip() or "Valoración",
+                args.get("servicio", "").strip() or "Tratamiento",
                 inicio,
                 int(args.get("duracion_min") or 60),
                 args.get("notas", ""),
@@ -273,6 +303,13 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+                if res.get("duplicada"):
+                    return (
+                        f"OJO: la clienta YA TENÍA una cita para {res['cuando']} (NO se creó otra, "
+                        "para no duplicar). Confírmale con calidez que su espacio para ese día/hora "
+                        "sigue apartado; NO digas que acabas de agendar de nuevo ni intentes agendar "
+                        "otra vez ese mismo horario."
+                    )
                 return (
                     f"CITA CREADA para {res['cuando']} (queda por confirmar). "
                     "Confírmale a la clienta con calidez que ya apartaste su espacio y que "
@@ -313,6 +350,18 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
             return (
                 f"NO se pudo cancelar: {res.get('error', 'error desconocido')}. "
                 "Discúlpate con calidez y ofrece pasar con el equipo."
+            )
+
+        if nombre == "cerrar_conversacion":
+            try:
+                await memory.pausar_seguimiento(telefono or "")
+            except Exception:  # noqa: BLE001
+                pass
+            logger.info(f"Seguimiento apagado (clienta declinó con amabilidad): {telefono}")
+            return (
+                "Listo: se apagó el seguimiento de esta clienta (no le escribiremos "
+                "proactivamente hasta que ella escriba). Despídete con calidez dejando la puerta "
+                "abierta y NO insistas más."
             )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error en herramienta {nombre}: {e}")
@@ -432,11 +481,15 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
         return None
     system_prompt = cargar_system_prompt() + _contexto_temporal()
     instruccion = (
-        "[NOTA INTERNA — no la menciones: la clienta dejó de responder hace unas horas y "
-        "todavía no agenda. Escríbele UN solo mensaje corto, cálido y natural para retomar y "
-        "CERRAR: recuérdale con gancho el beneficio de lo que le interesó y propón agendar su "
-        "valoración sin costo con un día y hora concretos. No la regañes por no contestar ni la "
-        "satures; suena como alguien que da seguimiento con clase. Máx 3 renglones, 1 emoji.]"
+        "[NOTA INTERNA — no la menciones: la clienta dejó la charla a medias y aún no agenda. "
+        "Escríbele UN SOLO mensaje corto, relajado y con clase, tipo recordatorio de VALOR, NO una "
+        "encuesta. Dale una razón concreta para agendar (el resultado/beneficio de lo que le "
+        "interesó, o que la especialista recomienda empezar pronto para ver resultados) y una "
+        "invitación fácil a apartar su espacio cuando guste. PROHIBIDO volver a preguntarle qué le "
+        "preocupa o qué busca (nada de '¿sigue siendo X lo que más te preocupa?': eso cansa). Nada "
+        "de 'valoraciones'. Lee todo el chat (incluye lo que dijo el equipo): no repitas lo ya "
+        "dicho, no la regañes por no contestar y no la satures. Suena natural, sin presión. "
+        "Máx 2 renglones, 1 emoji.]"
     )
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     mensajes.append({"role": "user", "content": instruccion})

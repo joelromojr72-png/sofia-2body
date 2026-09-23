@@ -28,6 +28,7 @@ from agent.memory import (
     marcar_evento_procesado,
     obtener_historial,
     registrar_inbound_lead,
+    registrar_outbound_equipo,
     reporte_leads,
     ultimas_conversaciones,
 )
@@ -72,6 +73,18 @@ DIAS_ESPECIALES: dict[date, tuple[time, time] | None] = {
     date(2026, 9, 15): (time(8, 0), time(16, 0)),  # hoy: equipo solo 08:00-16:00, Sofía desde las 4pm
     date(2026, 9, 16): None,                        # mañana: nadie del equipo trabaja, Sofía 24h
 }
+
+
+def sofia_pausada() -> bool:
+    """
+    Interruptor global de pausa (variable de entorno SOFIA_PAUSADA).
+
+    Cuando está activo, Sofía NO responde a nadie ni registra leads/seguimiento: sirve para
+    hacer pruebas sin que conteste a clientes reales. Se sigue capturando lo que escribe el
+    equipo humano (echos de coexistencia) para no perder el historial. Es totalmente
+    reversible: basta con quitar la variable (o ponerla en false) en Railway.
+    """
+    return os.getenv("SOFIA_PAUSADA", "").strip().lower() in ("1", "true", "si", "sí", "yes", "on")
 
 
 def sofia_debe_responder(ahora: datetime | None = None) -> bool:
@@ -178,6 +191,7 @@ async def health_check():
     return {
         "status": "ok" if estado_proveedor["ok"] else "degradado",
         "service": "agentkit",
+        "sofia_pausada": sofia_pausada(),
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
         "messenger": {
@@ -195,6 +209,23 @@ async def leads_report(key: str = ""):
     if not clave or key != clave:
         raise HTTPException(status_code=403, detail="clave invalida")
     return await reporte_leads()
+
+
+@app.post("/admin/recuperar")
+async def recuperar_pendientes(key: str = ""):
+    """
+    Reactiva bajo demanda a las clientas que quedaron a medias (dentro de la ventana de 24 h):
+    Sofía les manda UN mensaje cálido para retomar y cerrar. Útil tras una caída (p. ej. sin
+    saldo de la API). Reusa el motor de 'toque de cierre' (respeta opt-out, no molesta a quien
+    ya agendó ni a quien ya atendió el equipo, y no manda dos veces). Protegido con clave.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    if proveedor is None:
+        raise HTTPException(status_code=503, detail="proveedor no configurado")
+    enviados = await followup._ciclo_nudge(proveedor)
+    return {"status": "ok", "recuperados": enviados}
 
 
 @app.get("/mensajes")
@@ -264,6 +295,28 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
 
     encolados = 0
     for msg in mensajes:
+        # Echo del EQUIPO humano (coexistencia): cuando una persona contesta desde la app de
+        # WhatsApp Business, se guarda en el historial como turno del negocio ("assistant")
+        # para que Sofía sepa qué ya dijo el equipo y no se confunda ni repita. NO se contesta
+        # y se captura SIEMPRE (aunque sea horario de equipo).
+        if msg.contexto.get("tipo") == "echo_equipo":
+            eid = msg.contexto.get("evento_id") or msg.mensaje_id
+            if eid and not await marcar_evento_procesado(eid):
+                continue
+            if msg.texto.strip():
+                await guardar_mensaje(msg.telefono, "assistant", msg.texto)
+                try:
+                    await registrar_outbound_equipo(msg.telefono)
+                except Exception:  # noqa: BLE001
+                    pass
+                logger.info(f"Equipo humano (coexistencia) → {msg.telefono}: {msg.texto[:60]}")
+            continue
+
+        # PAUSA global (pruebas): Sofía no responde ni registra seguimiento. El echo del
+        # equipo (arriba) sí se sigue guardando para no perder el hilo de la conversación.
+        if sofia_pausada():
+            continue
+
         if msg.es_propio or not msg.texto.strip():
             continue
 

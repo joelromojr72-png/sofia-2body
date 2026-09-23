@@ -107,6 +107,10 @@ class Lead(Base):
         DateTime(timezone=True), nullable=True, index=True
     )
     nudge_enviado: Mapped[bool] = mapped_column(default=False)
+    # True cuando una persona del EQUIPO ya le escribió a esta clienta (echo de coexistencia).
+    # Si es True, el seguimiento automático (toque y multi-día) NO le manda nada: la relación
+    # ya la lleva una persona y Sofía no debe escribirle encima.
+    equipo_atendio: Mapped[bool] = mapped_column(default=False, index=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
@@ -135,11 +139,13 @@ async def _migrar_columnas_nudge():
         stmts = [
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_en TIMESTAMPTZ",
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_enviado BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS equipo_atendio BOOLEAN DEFAULT FALSE",
         ]
     else:  # sqlite u otros: intentar agregar, ignorar si ya existe
         stmts = [
             "ALTER TABLE leads ADD COLUMN nudge_en TIMESTAMP",
             "ALTER TABLE leads ADD COLUMN nudge_enviado BOOLEAN DEFAULT 0",
+            "ALTER TABLE leads ADD COLUMN equipo_atendio BOOLEAN DEFAULT 0",
         ]
     for s in stmts:
         try:
@@ -226,7 +232,17 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
     while mensajes and mensajes[0].role != "user":
         mensajes.pop(0)
 
-    return [{"role": m.role, "content": m.content} for m in mensajes]
+    # Fusiona turnos consecutivos del MISMO rol en uno solo. Hace falta porque ahora el
+    # historial incluye mensajes del equipo humano (guardados como 'assistant'): si el equipo
+    # manda 2 seguidos, o el equipo y luego Sofía, quedarían 2 'assistant' pegados y la API
+    # de Anthropic exige que los roles se alternen.
+    salida: list[dict] = []
+    for m in mensajes:
+        if salida and salida[-1]["role"] == m.role:
+            salida[-1]["content"] += "\n" + m.content
+        else:
+            salida.append({"role": m.role, "content": m.content})
+    return salida
 
 
 async def limpiar_historial(telefono: str):
@@ -346,6 +362,25 @@ async def actualizar_lead(telefono: str, nombre: str = "", interes: str = "") ->
         await s.commit()
 
 
+async def registrar_outbound_equipo(telefono: str) -> None:
+    """
+    Registra que el EQUIPO humano le respondió a esta clienta (echo de coexistencia): marca
+    last_outbound y apaga el 'toque de cierre' pendiente, para que el seguimiento automático
+    de Sofía NO le escriba encima a una conversación que una persona ya está atendiendo.
+    """
+    if not telefono:
+        return
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            return
+        lead.last_outbound = ahora()
+        lead.nudge_en = None
+        lead.nudge_enviado = True
+        lead.equipo_atendio = True  # ya la atiende una persona: Sofía no le da seguimiento
+        await s.commit()
+
+
 async def marcar_lead_agendado(telefono: str) -> None:
     """La clienta agendó: se apaga el seguimiento (no molestar a quien ya cerró)."""
     if not telefono:
@@ -373,6 +408,27 @@ async def marcar_lead_opt_out(telefono: str) -> None:
         await s.commit()
 
 
+async def pausar_seguimiento(telefono: str) -> None:
+    """
+    La clienta declinó con amabilidad y Sofía ya se despidió dejando la puerta abierta:
+    se apaga el seguimiento proactivo (toque de cierre y multi-día) para NO insistir. No es
+    opt-out duro: si la clienta vuelve a escribir, su lead se reactiva solo (registrar_inbound_lead
+    lo pone 'activo' de nuevo).
+    """
+    if not telefono:
+        return
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            lead = Lead(telefono=telefono, creado_en=ahora())
+            s.add(lead)
+        lead.estado = "pausado"
+        lead.proximo_seguimiento = None
+        lead.nudge_en = None
+        lead.nudge_enviado = True
+        await s.commit()
+
+
 async def leads_para_seguimiento(limite: int = 40) -> list[dict]:
     """Leads activos cuyo próximo seguimiento ya venció y aún les quedan toques."""
     async with async_session() as s:
@@ -380,6 +436,7 @@ async def leads_para_seguimiento(limite: int = 40) -> list[dict]:
             select(Lead)
             .where(
                 Lead.estado == "activo",
+                Lead.equipo_atendio.is_(False),  # si ya la atendió una persona, Sofía no le escribe
                 Lead.proximo_seguimiento.is_not(None),
                 Lead.proximo_seguimiento <= ahora(),
                 Lead.etapa_seguimiento < len(_CADENCIA_HORAS),
@@ -423,6 +480,7 @@ async def leads_para_nudge(limite: int = 40) -> list[dict]:
             select(Lead)
             .where(
                 Lead.estado == "activo",
+                Lead.equipo_atendio.is_(False),  # si ya la atendió una persona, Sofía no le escribe
                 Lead.nudge_enviado.is_(False),
                 Lead.nudge_en.is_not(None),
                 Lead.nudge_en <= ahora(),

@@ -199,6 +199,53 @@ def citas_del_dia(fecha: date) -> list[dict]:
     return citas
 
 
+def slots_libres(
+    fecha: date, duracion_min: int = 60, paso_min: int = 30, max_slots: int = 8
+) -> list[str]:
+    """
+    Calcula los horarios de inicio REALMENTE LIBRES de un día, para que Sofía ofrezca
+    solo huecos que no chocan con ninguna cita ya agendada.
+
+    Recorre el horario del spa en pasos de `paso_min` y devuelve cada inicio "HH:MM" donde
+    cabe una cita de `duracion_min` sin traslaparse con lo ya ocupado, sin salirse del cierre
+    y sin caer en el pasado (si la fecha es hoy). Devuelve como máximo `max_slots`.
+    """
+    hd = horario_dia(fecha)
+    if hd is None:
+        return []  # domingo / cerrado
+    apertura, cierre = hd
+    dur = max(15, int(duracion_min or 60))
+
+    # Intervalos ocupados como (inicio, fin) en objetos time del mismo día.
+    ocupadas: list[tuple[time, time]] = []
+    for c in citas_del_dia(fecha):
+        try:
+            hi = datetime.strptime(c["inicio"], "%H:%M").time()
+            hf = datetime.strptime(c["fin"], "%H:%M").time()
+        except (ValueError, KeyError):
+            continue
+        ocupadas.append((hi, hf))
+
+    ahora = datetime.now(TZ)
+    t = datetime.combine(fecha, apertura, tzinfo=TZ)
+    fin_dia = datetime.combine(fecha, cierre, tzinfo=TZ)
+    paso = timedelta(minutes=max(5, paso_min))
+    d = timedelta(minutes=dur)
+
+    libres: list[str] = []
+    while t + d <= fin_dia:
+        ini_t, fin_t = t.time(), (t + d).time()
+        en_futuro = t >= ahora + timedelta(minutes=1)
+        # Traslape con alguna ocupada: (ini < fin_ocupada) y (fin > ini_ocupada).
+        choca = any(ini_t < of and fin_t > oi for (oi, of) in ocupadas)
+        if en_futuro and not choca:
+            libres.append(t.strftime("%H:%M"))
+            if len(libres) >= max_slots:
+                break
+        t += paso
+    return libres
+
+
 def citas_para_confirmar(fecha: date) -> list[dict]:
     """
     Citas de un día con los datos necesarios para mandar la confirmación por WhatsApp:
@@ -298,6 +345,65 @@ def crear_cita(
         }
 
     tel = telefono if telefono.startswith("+") else f"+{telefono}"
+
+    # ── Anti-doble-agenda (candado del lado del servidor) ────────────────
+    # Antes de insertar, revisamos las citas del día y checamos si el horario
+    # [inicio, fin) se traslapa con alguna existente:
+    #   • Traslape de ESTA MISMA clienta → ya tenía esa cita: NO duplicamos; devolvemos la
+    #     que ya existe (idempotente). Esto es lo que corrige el doble-agendado cuando el
+    #     modelo llamaba a agendar dos veces (reintentos, "sí confírmame", etc.).
+    #   • Traslape de OTRA clienta → el horario está ocupado: se rechaza para que Sofía
+    #     ofrezca otra hora (nunca dos citas encimadas en el mismo espacio).
+    # No depende del prompt: aunque el modelo insista, la agenda no se duplica.
+    tel_digits = "".join(c for c in tel if c.isdigit())
+    try:
+        dia_ini = datetime.combine(inicio.date(), time(0, 0), tzinfo=TZ)
+        dia_fin = dia_ini + timedelta(days=1)
+        existentes = (
+            svc.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                timeMin=dia_ini.isoformat(),
+                timeMax=dia_fin.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        ).get("items", [])
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"No se pudieron revisar traslapes antes de agendar: {e}")
+        existentes = []
+
+    for ev in existentes:
+        if ev.get("status") == "cancelled":
+            continue
+        s = ev.get("start", {}).get("dateTime")
+        e = ev.get("end", {}).get("dateTime")
+        if not s or not e:
+            continue  # eventos de día completo no bloquean horarios
+        try:
+            ev_ini = datetime.fromisoformat(s).astimezone(TZ)
+            ev_fin = datetime.fromisoformat(e).astimezone(TZ)
+        except ValueError:
+            continue
+        if inicio < ev_fin and fin > ev_ini:  # hay traslape
+            ev_desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
+            mismo_cliente = bool(tel_digits) and tel_digits in ev_desc_digits
+            cuando_ev = f"{_DIAS[ev_ini.weekday()]} {ev_ini.day} a las {ev_ini.strftime('%H:%M')}"
+            if mismo_cliente:
+                logger.info(f"Doble-agenda evitada: {tel} ya tenía cita @ {ev_ini.isoformat()}")
+                return {
+                    "ok": True,
+                    "duplicada": True,
+                    "cuando": cuando_ev,
+                    "link": ev.get("htmlLink", ""),
+                }
+            logger.info(f"Horario ocupado, se rechaza: {inicio.isoformat()} (choca con {ev_ini.isoformat()})")
+            return {
+                "ok": False,
+                "error": f"Ese horario ({inicio.strftime('%H:%M')}) ya está ocupado; ofrece otra hora.",
+            }
+
     cuerpo = {
         "summary": f"Cita (por confirmar) - {servicio} - {nombre}",
         "description": (
@@ -319,6 +425,55 @@ def crear_cita(
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error creando la cita: {e}")
         return {"ok": False, "error": "No se pudo guardar en la agenda."}
+
+    # ── Recheck anti-carrera ─────────────────────────────────────────────
+    # El candado previo no basta si DOS clientas distintas caen al mismo hueco casi al
+    # mismo tiempo (las dos leyeron "libre" antes de que la otra insertara). Volvemos a
+    # leer el día: si otra cita de OTRA clienta se traslapa y se creó ANTES que la nuestra,
+    # ella gana el hueco y borramos la nuestra para no empalmar.
+    try:
+        nuestro_id = ev.get("id", "")
+        nuestro_created = ev.get("created", "")
+        recheck = (
+            svc.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                timeMin=dia_ini.isoformat(),
+                timeMax=dia_fin.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            )
+            .execute()
+        ).get("items", [])
+        for otro in recheck:
+            if otro.get("id") == nuestro_id or otro.get("status") == "cancelled":
+                continue
+            s = otro.get("start", {}).get("dateTime")
+            e = otro.get("end", {}).get("dateTime")
+            if not s or not e:
+                continue
+            try:
+                oi = datetime.fromisoformat(s).astimezone(TZ)
+                of = datetime.fromisoformat(e).astimezone(TZ)
+            except ValueError:
+                continue
+            if inicio < of and fin > oi:  # se traslapan
+                od = "".join(c for c in otro.get("description", "") if c.isdigit())
+                if tel_digits and tel_digits in od:
+                    continue  # es otra cita de la MISMA clienta, no un empalme con alguien más
+                if otro.get("created", "") < nuestro_created:
+                    # La otra clienta llegó primero: cedemos el hueco y quitamos la nuestra.
+                    try:
+                        svc.events().delete(calendarId=CALENDAR_ID, eventId=nuestro_id).execute()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    logger.info(f"Carrera: se cede el hueco {inicio.isoformat()} a una cita previa")
+                    return {
+                        "ok": False,
+                        "error": f"Ese horario ({inicio.strftime('%H:%M')}) se acaba de ocupar; ofrece otra hora.",
+                    }
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"No se pudo re-verificar traslape post-insert: {e}")
 
     dia_txt = _DIAS[inicio.weekday()]
     cuando = f"{dia_txt} {inicio.day} a las {inicio.strftime('%H:%M')}"

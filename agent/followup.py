@@ -20,7 +20,7 @@ SEGURIDAD DEL NÚMERO: el spam baja la calidad del número y puede banearlo. Por
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from agent import memory
@@ -32,6 +32,11 @@ TZ = ZoneInfo(os.getenv("FOLLOWUP_TZ") or "America/Mexico_City")
 
 def habilitado() -> bool:
     return os.getenv("FOLLOWUP_ENABLED", "").strip().lower() in ("1", "true", "si", "yes", "on")
+
+
+def _pausada() -> bool:
+    """Interruptor global de pausa (SOFIA_PAUSADA): durante pruebas no se envía seguimiento."""
+    return os.getenv("SOFIA_PAUSADA", "").strip().lower() in ("1", "true", "si", "sí", "yes", "on")
 
 
 def _templates() -> list[str]:
@@ -215,6 +220,10 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
     )
     while True:
         try:
+            if _pausada():
+                # Pausa global para pruebas: no se manda ningún seguimiento/confirmación.
+                await asyncio.sleep(intervalo_seg)
+                continue
             if habilitado():
                 # 1) Toque de cierre dentro de 24 h (mensaje libre, no necesita plantilla).
                 if _en_horario_nudge():

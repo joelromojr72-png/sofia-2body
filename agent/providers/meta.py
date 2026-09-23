@@ -85,13 +85,42 @@ class ProveedorMeta(ProveedorWhatsApp):
         return True
 
     async def parsear_webhook(self, request: Request) -> list[MensajeEntrante]:
-        """Recorre el payload anidado de Meta Cloud API."""
+        """
+        Recorre el payload anidado de Meta Cloud API.
+
+        Además de los mensajes entrantes del cliente (`messages`), captura los ECHOES de
+        COEXISTENCIA (`smb_message_echoes`): cuando una persona del EQUIPO contesta desde la
+        app de WhatsApp Business en el mismo número, Meta manda una copia. La marcamos como
+        `tipo=echo_equipo` para que main.py la guarde en el historial (turno del negocio) y
+        Sofía sepa qué ya respondió una persona, sin volver a contestar ese echo.
+        """
         body = await request.json()
         mensajes: list[MensajeEntrante] = []
 
         for entry in body.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value") or {}
+
+                # 1) Echoes del equipo humano (coexistencia): el negocio escribió desde la app.
+                #    La conversación es con `to` (el cliente); el texto lo dijo una persona.
+                for eco in value.get("message_echoes", []):
+                    if eco.get("type") != "text":
+                        continue
+                    cliente = eco.get("to", "")
+                    if not cliente:
+                        continue
+                    eco_id = eco.get("id", "")
+                    mensajes.append(
+                        MensajeEntrante(
+                            telefono=cliente,
+                            texto=(eco.get("text") or {}).get("body", ""),
+                            mensaje_id=eco_id,
+                            es_propio=False,  # main.py lo enruta por 'tipo', no lo contesta
+                            contexto={"evento_id": f"eco:{eco_id}", "tipo": "echo_equipo"},
+                        )
+                    )
+
+                # 2) Mensajes entrantes normales del cliente.
                 for msg in value.get("messages", []):
                     if msg.get("type") != "text":
                         continue  # por ahora solo texto
