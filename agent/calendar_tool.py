@@ -84,7 +84,8 @@ _DEFAULT_SERVICE_CALENDARS: list[tuple[str, str, list[str]]] = [
         ["corpor", "moldea", "cavitaci", "mesoterap", "lipo", "reafirm", "celulit",
          "glúteo", "gluteo", "busto", "estría", "estria", "post-parto", "postparto",
          "tonific", "abdomen", "cintura", "vela", "madero", "maderoterap", "drenaje",
-         "radiofrec", "vacum", "vacuum"],
+         "linfátic", "linfatic", "radiofrec", "vacum", "vacuum", "gimnasia", "pasiva",
+         "ems", "electromagn"],
     ),
     (
         "venta",
