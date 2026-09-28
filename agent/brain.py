@@ -200,25 +200,29 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
     if hay_agenda:
         return (
             "\n\n## Agenda automática (tienes herramientas)\n"
-            "Puedes agendar DE VERDAD. Vendes TRATAMIENTOS directo (no 'valoraciones'). Cuando la "
-            "clienta quiera empezar un tratamiento:\n"
-            "1) Pide solo lo indispensable: su nombre y qué tratamiento quiere. Si no lo dijo, "
-            "RECOMIÉNDALE el ideal en vez de preguntar de más. Una cosa a la vez, sin interrogar.\n"
+            "Puedes agendar DE VERDAD. Háblale SIEMPRE de USTED. Tu gancho estrella es invitarla "
+            "a su PRIMERA SESIÓN SIN COSTO (corporal o facial, según lo que le interese) para que "
+            "venga a vivir la experiencia y vea resultados reales; también puedes agendar el "
+            "tratamiento o paquete que ella pida. Cuando quiera apartar su espacio:\n"
+            "1) Pide solo lo indispensable, de a poco y sin interrogar: su nombre y qué le "
+            "gustaría (si busca figura/moldear → sesión corporal; si busca piel/rostro → facial). "
+            "Si no lo dijo, recomiéndele con calidez la que mejor le acomoda.\n"
             "2) ANTES de proponer u ofrecer CUALQUIER hora, usa SIEMPRE "
             "`consultar_disponibilidad` de ese día y ofrécele 1-2 horarios ÚNICAMENTE de los que "
             "la herramienta marque libres. NUNCA ofrezcas, confirmes ni des por buena una hora sin "
             "haberla verificado ahí: así no se empalman las citas.\n"
             "3) Cuando ella acepte una hora concreta (de las libres), llama `agendar_cita` (en "
-            "'servicio' pon el tratamiento que va a empezar).\n"
-            "4) Al confirmarse, dile con calidez que su primera sesión quedó apartada (por "
-            "confirmar) y que el equipo le confirma por aquí. La primera sesión dura ~60 min.\n"
+            "'servicio' pon lo que va a vivir: p. ej. 'Sesión corporal sin costo', 'Sesión facial "
+            "sin costo' o el tratamiento/paquete que pidió).\n"
+            "4) Al confirmarse, dígale con calidez que su espacio quedó apartado (por confirmar) y "
+            "que el equipo le confirma por aquí. La sesión dura ~60 min.\n"
             "No inventes horarios: siempre revisa con la herramienta. Si la herramienta te dice "
             "que ese horario ya está ocupado, ofrece otra hora; si te dice que la clienta YA tenía "
-            "esa cita, NO agendes de nuevo, solo confírmasela. Si la herramienta falla, toma la "
-            "solicitud y dile que el equipo confirma.\n"
+            "esa cita, NO agendes de nuevo, solo confírmesela. Si la herramienta falla, toma la "
+            "solicitud y dígale que el equipo confirma.\n"
             "Para CANCELAR: usa `consultar_mis_citas` para ver sus citas; si tiene una sola, "
             "confirma con ella que esa quiere cancelar y usa `cancelar_cita`; si tiene varias, "
-            "pregúntale cuál. Nunca canceles sin confirmar. Los evento_id son internos: no se "
+            "pregúntele cuál. Nunca canceles sin confirmar. Los evento_id son internos: no se "
             "los muestres. Para REAGENDAR: cancela la anterior y agenda la nueva.\n"
             "Si la clienta declina con amabilidad (dice que no por ahora) y ya te despediste "
             "dejando la puerta abierta, usa `cerrar_conversacion` para apagar su seguimiento; no "
@@ -226,8 +230,9 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
         )
     return (
         "\n\n## Agenda\n"
-        "La agenda automática no está disponible ahora: toma la solicitud (nombre, servicio, "
-        "día y hora que le acomoden) y dile que una compañera del equipo le confirma la "
+        "La agenda automática no está disponible ahora: háblale de USTED, toma la solicitud "
+        "(nombre, qué le gustaría —sesión corporal o facial sin costo, o el tratamiento que pida—, "
+        "día y hora que le acomoden) y dígale que una compañera del equipo le confirma la "
         "disponibilidad por aquí."
     )
 
@@ -474,22 +479,21 @@ async def generar_respuesta(
 
 async def generar_seguimiento(historial: list[dict]) -> str | None:
     """
-    Redacta UN mensaje de reenganche (toque de cierre) para una clienta que dejó la charla
-    a medias, usando la personalidad cerradora + el historial. Devuelve el texto o None.
+    Redacta UN mensaje de reenganche cálido (estilo concierge) para una clienta que dejó la
+    charla a medias, usando la personalidad de asesora + el historial. Devuelve el texto o None.
     """
     if not historial:
         return None
     system_prompt = cargar_system_prompt() + _contexto_temporal()
     instruccion = (
         "[NOTA INTERNA — no la menciones: la clienta dejó la charla a medias y aún no agenda. "
-        "Escríbele UN SOLO mensaje corto, relajado y con clase, tipo recordatorio de VALOR, NO una "
-        "encuesta. Dale una razón concreta para agendar (el resultado/beneficio de lo que le "
-        "interesó, o que la especialista recomienda empezar pronto para ver resultados) y una "
-        "invitación fácil a apartar su espacio cuando guste. PROHIBIDO volver a preguntarle qué le "
-        "preocupa o qué busca (nada de '¿sigue siendo X lo que más te preocupa?': eso cansa). Nada "
-        "de 'valoraciones'. Lee todo el chat (incluye lo que dijo el equipo): no repitas lo ya "
-        "dicho, no la regañes por no contestar y no la satures. Suena natural, sin presión. "
-        "Máx 2 renglones, 1 emoji.]"
+        "Háblale de USTED. Escríbele UN SOLO mensaje corto, cálido y con clase, tipo recordatorio "
+        "de VALOR, NO una encuesta. Dale una razón concreta y amable (el resultado/beneficio de lo "
+        "que le interesó) e invítala con suavidad a vivir su primera sesión SIN COSTO (corporal o "
+        "facial) cuando guste, dejando la puerta abierta. PROHIBIDO volver a preguntarle qué le "
+        "preocupa o qué busca (nada de '¿sigue siendo X lo que más le preocupa?': eso cansa). Lee "
+        "todo el chat (incluye lo que dijo el equipo): no repitas lo ya dicho, no la regañes por no "
+        "contestar y no la satures. Suena natural, sin presión. Máx 2 renglones, 1 emoji.]"
     )
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     mensajes.append({"role": "user", "content": instruccion})

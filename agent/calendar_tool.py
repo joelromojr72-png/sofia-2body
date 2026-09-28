@@ -1,19 +1,32 @@
-# agent/calendar_tool.py — Agenda real en Google Calendar
+# agent/calendar_tool.py — Agenda real en Google Calendar (multi-calendario)
 # Generado por AgentKit
 
 """
 Conexion con Google Calendar para que Sofia agende citas de verdad.
 
-Se autentica con una CUENTA DE SERVICIO (service account) que tiene permiso de
-edicion sobre el calendario dedicado "Citas 2Body". Asi el agente no depende de que
-ningun humano tenga sesion iniciada.
+2 Body Pachuca NO usa un solo calendario: el equipo tiene un calendario POR SERVICIO
+(masajes, Faciales, corporales, Depilación, "cita de venta o ex unica"), cada uno con su
+propio color. Las citas reales viven ahí, no en el calendario principal (pachuca@2body.mx,
+que está vacío). Por eso Sofia:
+
+  • LEE la disponibilidad de TODOS los calendarios de servicio a la vez (más el principal),
+    para no ofrecer un horario que en realidad ya está ocupado y no encimar citas.
+  • ESCRIBE cada cita nueva en el calendario del SERVICIO que corresponde, para que aparezca
+    con el color de ese servicio y el equipo la vea donde toca.
+
+NO crea bloqueos, espejos ni eventos "Ocupado": el calendario del equipo NO se ensucia,
+solo aparece lo que de verdad se agendó.
+
+Se autentica con OAuth de usuario (la app actúa COMO pachuca@2body.mx) o, de respaldo, con
+una cuenta de servicio. Así el agente no depende de que ningún humano tenga sesión iniciada.
 
 Variables de entorno:
-  GOOGLE_CREDENTIALS_JSON  -> el JSON de la cuenta de servicio, en base64 (recomendado)
-                             o pegado tal cual. Si esta vacio, la agenda queda apagada
-                             y Sofia cae al modo "el equipo confirma".
-  GOOGLE_CALENDAR_ID       -> el id del calendario "Citas 2Body".
+  GOOGLE_OAUTH_CLIENT_ID / _SECRET / _REFRESH_TOKEN -> credenciales OAuth (preferido).
+  GOOGLE_CREDENTIALS_JSON  -> JSON de cuenta de servicio (base64 o texto), respaldo.
+  GOOGLE_CALENDAR_ID       -> calendario principal (pachuca@2body.mx). Gatilla la agenda.
   GOOGLE_CALENDAR_TZ       -> opcional, default America/Mexico_City.
+  GOOGLE_SERVICE_CALENDARS -> opcional, JSON {"masajes":"<id>", ...} para sobrescribir los
+                              ids de los calendarios de servicio sin tocar el código.
 
 Las funciones son SINCRONAS (la libreria de Google lo es). brain.py las llama dentro
 de asyncio.to_thread para no bloquear el event loop.
@@ -32,20 +45,116 @@ logger = logging.getLogger("agentkit")
 TZ = ZoneInfo(os.getenv("GOOGLE_CALENDAR_TZ") or "America/Mexico_City")
 CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "").strip()
 # Si se define, la cuenta de servicio impersona a este usuario del dominio (Delegación a
-# nivel de dominio). Necesario cuando el Workspace no deja compartir edición con externos:
-# se autoriza el client_id del SA + este scope en el Admin console, y el SA actúa como este
-# usuario (ej. pachuca@2body.mx), con acceso pleno a su propio calendario.
+# nivel de dominio). Necesario cuando el Workspace no deja compartir edición con externos.
 IMPERSONAR = os.getenv("GOOGLE_IMPERSONATE_SUBJECT", "").strip()
 
-# OAuth de usuario (la app actua COMO este usuario, ej. pachuca@2body.mx). Se usa cuando
-# el Workspace no deja compartir edicion con una cuenta de servicio externa: se crea una
-# app OAuth interna del dominio, el usuario autoriza una vez y aqui va su refresh token.
-# Si estan estas tres, se prefiere OAuth sobre la cuenta de servicio.
+# OAuth de usuario (la app actua COMO este usuario, ej. pachuca@2body.mx). Si estan estas
+# tres, se prefiere OAuth sobre la cuenta de servicio.
 OAUTH_CLIENT_ID = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
 OAUTH_REFRESH_TOKEN = os.getenv("GOOGLE_OAUTH_REFRESH_TOKEN", "").strip()
 
 _SCOPES = ["https://www.googleapis.com/auth/calendar"]
+
+# ── Calendarios por servicio ─────────────────────────────────────────────
+# (clave, id del calendario, palabras clave para rutear un servicio a este calendario).
+# Cada calendario ya tiene su color en Google Calendar: la cita hereda ese color sola, por
+# eso NO forzamos colorId. El orden importa: gana la primera coincidencia de palabra clave;
+# si nada coincide, la cita cae al calendario "venta" (valoración / experiencia única).
+_DEFAULT_SERVICE_CALENDARS: list[tuple[str, str, list[str]]] = [
+    (
+        "masajes",
+        "c_f54cdd584a9a7008155f1687943a06c6c4047d22fba1cca8453b9e7c5f1d0488@group.calendar.google.com",
+        ["masaje", "relaj", "descontractur", "sueco", "piedras", "espalda"],
+    ),
+    (
+        "faciales",
+        "c_9734a2365fd1b75d5dd8194adcf9aba3c389abcee716a97e4bed2ab79e4bcfc8@group.calendar.google.com",
+        ["facial", "rostro", "limpieza", "hidrataci", "mancha", "acné", "acne",
+         "rejuven", "porcelana", "peeling", "dermapen", "piel"],
+    ),
+    (
+        "depilacion",
+        "c_9d868531d58565c5b3a443bc99d66f207f10300a1502c0234c173002465c1215@group.calendar.google.com",
+        ["depil", "láser", "laser", "cuatridiodo", "axila", "bikini", "ingle", "vello"],
+    ),
+    (
+        "corporales",
+        "c_f17c2782edafa27e35cf708468788cda8a540fd400247a82842672b8647621eb@group.calendar.google.com",
+        ["corpor", "moldea", "cavitaci", "mesoterap", "lipo", "reafirm", "celulit",
+         "glúteo", "gluteo", "busto", "estría", "estria", "post-parto", "postparto",
+         "tonific", "abdomen", "cintura", "vela", "madero", "maderoterap", "drenaje",
+         "radiofrec", "vacum", "vacuum"],
+    ),
+    (
+        "venta",
+        "c_c227eba35cacc025662e6a6cf42ac2ff402aa33a76792bf2923a6335f86ec25c@group.calendar.google.com",
+        ["valorac", "venta", "primera", "diagn", "experiencia", "gratis", "sin costo",
+         "cortesía", "cortesia", "conocer", "cita"],
+    ),
+]
+
+# El calendario "venta" es el de respaldo (valoración / experiencia única gratis).
+_CAL_VENTA_KEY = "venta"
+
+
+def _cargar_service_calendars() -> list[tuple[str, str, list[str]]]:
+    """Aplica el override de GOOGLE_SERVICE_CALENDARS (JSON) sobre los ids por defecto."""
+    override_raw = os.getenv("GOOGLE_SERVICE_CALENDARS", "").strip()
+    override: dict = {}
+    if override_raw:
+        try:
+            override = json.loads(override_raw) or {}
+        except json.JSONDecodeError as e:
+            logger.error(f"GOOGLE_SERVICE_CALENDARS no es JSON valido, se ignora: {e}")
+    salida = []
+    for clave, cal_id, kws in _DEFAULT_SERVICE_CALENDARS:
+        salida.append((clave, str(override.get(clave, cal_id)).strip() or cal_id, kws))
+    return salida
+
+
+_SERVICE_CALENDARS = _cargar_service_calendars()
+_CAL_POR_CLAVE = {clave: cal_id for clave, cal_id, _ in _SERVICE_CALENDARS}
+
+
+def _calendario_venta() -> str:
+    """Calendario de respaldo: 'cita de venta o ex unica'."""
+    return _CAL_POR_CLAVE.get(_CAL_VENTA_KEY) or CALENDAR_ID
+
+
+def _calendario_para_servicio(texto: str) -> str:
+    """Devuelve el id del calendario que le toca a un servicio, por palabras clave."""
+    t = (texto or "").lower()
+    for clave, cal_id, kws in _SERVICE_CALENDARS:
+        if clave == _CAL_VENTA_KEY:
+            continue  # el de venta es el respaldo: se evalúa al final
+        if any(k in t for k in kws):
+            return cal_id
+    # Palabras clave del propio calendario de venta (valoración/experiencia) o, si nada
+    # coincide, el respaldo: la primera sesión de valoración / experiencia única.
+    return _calendario_venta()
+
+
+def _calendarios_disponibilidad() -> list[str]:
+    """Todos los calendarios que se leen para saber qué horarios están ocupados."""
+    ids = [cal_id for _, cal_id, _ in _SERVICE_CALENDARS]
+    if CALENDAR_ID and CALENDAR_ID not in ids:
+        ids.append(CALENDAR_ID)  # por si el equipo apunta algo en el principal
+    return ids
+
+
+def _componer_evento_id(cal_id: str, ev_id: str) -> str:
+    """Empaqueta calendario+evento en un solo id opaco para el modelo (para poder cancelar)."""
+    return f"{cal_id}|{ev_id}"
+
+
+def _partir_evento_id(evento_id: str) -> tuple[str, str]:
+    """Separa el id compuesto. Compatibilidad: sin '|' se asume el calendario principal."""
+    if evento_id and "|" in evento_id:
+        cal, _, eid = evento_id.partition("|")
+        return cal, eid
+    return CALENDAR_ID, evento_id
+
 
 # Horario del negocio por dia de la semana (0=Lun ... 6=Dom). None = cerrado.
 HORARIO = {
@@ -76,6 +185,7 @@ def _oauth_configurado() -> bool:
     """True si hay credenciales OAuth de usuario completas (refresh token incluido)."""
     return bool(OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET and OAUTH_REFRESH_TOKEN)
 
+
 _servicio = None  # cache del cliente de Calendar
 
 
@@ -84,7 +194,6 @@ def _cargar_credenciales_json() -> dict | None:
     crudo = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
     if not crudo:
         return None
-    # Primero se intenta como base64; si no, se asume que es el JSON pegado directo.
     try:
         crudo = base64.b64decode(crudo).decode("utf-8")
     except (binascii.Error, ValueError, UnicodeDecodeError):
@@ -129,7 +238,6 @@ def _obtener_servicio():
         return None
     creds = service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
     if IMPERSONAR:
-        # Delegación a nivel de dominio: actuar como este usuario del Workspace.
         creds = creds.with_subject(IMPERSONAR)
     _servicio = build("calendar", "v3", credentials=creds, cache_discovery=False)
     return _servicio
@@ -141,49 +249,66 @@ def horario_dia(fecha: date) -> tuple[time, time] | None:
 
 
 def verificar_conexion() -> tuple[bool, str]:
-    """Chequeo de arranque: confirma que el SA puede leer el calendario."""
+    """Chequeo de arranque: confirma que se puede leer el calendario principal."""
     if not calendario_configurado():
-        return False, "Agenda apagada (faltan GOOGLE_CREDENTIALS_JSON o GOOGLE_CALENDAR_ID)"
+        return False, "Agenda apagada (faltan credenciales o GOOGLE_CALENDAR_ID)"
     try:
         svc = _obtener_servicio()
         cal = svc.calendars().get(calendarId=CALENDAR_ID).execute()
-        return True, f"Calendario '{cal.get('summary', '?')}' conectado"
+        n = len(_calendarios_disponibilidad())
+        return True, f"Calendario '{cal.get('summary', '?')}' conectado ({n} calendarios en lectura)"
     except Exception as e:  # noqa: BLE001
         return False, f"No se pudo abrir el calendario: {e}"
 
 
-def citas_del_dia(fecha: date) -> list[dict]:
-    """
-    Devuelve las citas YA agendadas ese dia (para no encimar).
-    Cada item: {"inicio": "HH:MM", "fin": "HH:MM", "titulo": str}.
-    """
-    svc = _obtener_servicio()
-    if not svc:
-        return []
-    inicio = datetime.combine(fecha, time(0, 0), tzinfo=TZ)
-    fin = inicio + timedelta(days=1)
+def _listar_eventos(svc, cal_id: str, ini_iso: str, fin_iso: str) -> list[dict]:
+    """Lista los eventos de UN calendario en un rango. Un calendario que falla no tumba el resto."""
     try:
         resp = (
             svc.events()
             .list(
-                calendarId=CALENDAR_ID,
-                timeMin=inicio.isoformat(),
-                timeMax=fin.isoformat(),
+                calendarId=cal_id,
+                timeMin=ini_iso,
+                timeMax=fin_iso,
                 singleEvents=True,
                 orderBy="startTime",
             )
             .execute()
         )
+        return resp.get("items", [])
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Error leyendo el calendario: {e}")
+        logger.error(f"Error leyendo calendario {cal_id}: {e}")
+        return []
+
+
+def _eventos_dia_todos(svc, fecha: date) -> list[tuple[str, dict]]:
+    """Todos los eventos de un día en TODOS los calendarios de disponibilidad. (cal_id, evento)."""
+    ini = datetime.combine(fecha, time(0, 0), tzinfo=TZ)
+    fin = ini + timedelta(days=1)
+    salida: list[tuple[str, dict]] = []
+    for cal_id in _calendarios_disponibilidad():
+        for ev in _listar_eventos(svc, cal_id, ini.isoformat(), fin.isoformat()):
+            salida.append((cal_id, ev))
+    return salida
+
+
+def citas_del_dia(fecha: date) -> list[dict]:
+    """
+    Citas YA agendadas ese dia en TODOS los calendarios de servicio (para no encimar).
+    Cada item: {"inicio": "HH:MM", "fin": "HH:MM", "titulo": str}.
+    """
+    svc = _obtener_servicio()
+    if not svc:
         return []
 
     citas = []
-    for ev in resp.get("items", []):
+    for _cal_id, ev in _eventos_dia_todos(svc, fecha):
+        if ev.get("status") == "cancelled":
+            continue
         ini = ev.get("start", {}).get("dateTime")
         f = ev.get("end", {}).get("dateTime")
         if not ini or not f:
-            continue  # eventos de dia completo se ignoran
+            continue  # eventos de dia completo (ej. festivos) no bloquean horarios
         try:
             di = datetime.fromisoformat(ini).astimezone(TZ)
             df = datetime.fromisoformat(f).astimezone(TZ)
@@ -203,12 +328,8 @@ def slots_libres(
     fecha: date, duracion_min: int = 60, paso_min: int = 30, max_slots: int = 8
 ) -> list[str]:
     """
-    Calcula los horarios de inicio REALMENTE LIBRES de un día, para que Sofía ofrezca
-    solo huecos que no chocan con ninguna cita ya agendada.
-
-    Recorre el horario del spa en pasos de `paso_min` y devuelve cada inicio "HH:MM" donde
-    cabe una cita de `duracion_min` sin traslaparse con lo ya ocupado, sin salirse del cierre
-    y sin caer en el pasado (si la fecha es hoy). Devuelve como máximo `max_slots`.
+    Horarios de inicio REALMENTE LIBRES de un día (descontando lo ocupado en TODOS los
+    calendarios), para que Sofía ofrezca solo huecos que no chocan con ninguna cita.
     """
     hd = horario_dia(fecha)
     if hd is None:
@@ -216,7 +337,6 @@ def slots_libres(
     apertura, cierre = hd
     dur = max(15, int(duracion_min or 60))
 
-    # Intervalos ocupados como (inicio, fin) en objetos time del mismo día.
     ocupadas: list[tuple[time, time]] = []
     for c in citas_del_dia(fecha):
         try:
@@ -236,7 +356,6 @@ def slots_libres(
     while t + d <= fin_dia:
         ini_t, fin_t = t.time(), (t + d).time()
         en_futuro = t >= ahora + timedelta(minutes=1)
-        # Traslape con alguna ocupada: (ini < fin_ocupada) y (fin > ini_ocupada).
         choca = any(ini_t < of and fin_t > oi for (oi, of) in ocupadas)
         if en_futuro and not choca:
             libres.append(t.strftime("%H:%M"))
@@ -248,10 +367,8 @@ def slots_libres(
 
 def citas_para_confirmar(fecha: date) -> list[dict]:
     """
-    Citas de un día con los datos necesarios para mandar la confirmación por WhatsApp:
-    teléfono, nombre, servicio y hora. Saca el teléfono/nombre/servicio de la descripción
-    del evento (como los guarda crear_cita). Ignora eventos sin teléfono o de día completo.
-
+    Citas de un día (en todos los calendarios) con datos para confirmar por WhatsApp.
+    Solo las que Sofía tomó (tienen 'WhatsApp: +...' en la descripción).
     Cada item: {"evento_id", "telefono", "nombre", "servicio", "cuando", "hora"}.
     """
     import re
@@ -259,33 +376,18 @@ def citas_para_confirmar(fecha: date) -> list[dict]:
     svc = _obtener_servicio()
     if not svc:
         return []
-    inicio = datetime.combine(fecha, time(0, 0), tzinfo=TZ)
-    fin = inicio + timedelta(days=1)
-    try:
-        resp = (
-            svc.events()
-            .list(
-                calendarId=CALENDAR_ID,
-                timeMin=inicio.isoformat(),
-                timeMax=fin.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error leyendo citas para confirmar: {e}")
-        return []
 
     out = []
-    for ev in resp.get("items", []):
+    for cal_id, ev in _eventos_dia_todos(svc, fecha):
+        if ev.get("status") == "cancelled":
+            continue
         ini = ev.get("start", {}).get("dateTime")
         if not ini:
-            continue  # eventos de día completo se ignoran
+            continue
         desc = ev.get("description", "") or ""
         m_tel = re.search(r"WhatsApp:\s*\+?([0-9]{8,15})", desc)
         if not m_tel:
-            continue  # sin teléfono no se puede confirmar (ej. evento manual del equipo)
+            continue  # sin teléfono no se puede confirmar (evento manual del equipo)
         m_serv = re.search(r"Servicio:\s*(.+)", desc)
         m_nom = re.search(r"Cliente:\s*(.+)", desc)
         try:
@@ -294,7 +396,7 @@ def citas_para_confirmar(fecha: date) -> list[dict]:
             continue
         out.append(
             {
-                "evento_id": ev.get("id", ""),
+                "evento_id": _componer_evento_id(cal_id, ev.get("id", "")),
                 "telefono": m_tel.group(1),
                 "nombre": (m_nom.group(1).strip() if m_nom else ""),
                 "servicio": (m_serv.group(1).strip() if m_serv else ev.get("summary", "tu cita")),
@@ -314,7 +416,8 @@ def crear_cita(
     notas: str = "",
 ) -> dict:
     """
-    Crea un evento (marcado 'por confirmar') en el calendario Citas 2Body.
+    Crea la cita (marcada 'por confirmar') en el calendario del SERVICIO que corresponde.
+    Antes revisa disponibilidad en TODOS los calendarios para no encimar.
 
     Retorna {"ok": True, "cuando": "...", "link": "..."} o {"ok": False, "error": "..."}.
     """
@@ -327,7 +430,6 @@ def crear_cita(
     else:
         inicio = inicio.astimezone(TZ)
 
-    # Validaciones de sentido comun (no agendar en el pasado ni fuera de horario).
     ahora = datetime.now(TZ)
     if inicio < ahora - timedelta(minutes=1):
         return {"ok": False, "error": "Esa fecha/hora ya pasó."}
@@ -345,34 +447,14 @@ def crear_cita(
         }
 
     tel = telefono if telefono.startswith("+") else f"+{telefono}"
+    tel_digits = "".join(c for c in tel if c.isdigit())
+    cal_destino = _calendario_para_servicio(servicio)
 
     # ── Anti-doble-agenda (candado del lado del servidor) ────────────────
-    # Antes de insertar, revisamos las citas del día y checamos si el horario
-    # [inicio, fin) se traslapa con alguna existente:
-    #   • Traslape de ESTA MISMA clienta → ya tenía esa cita: NO duplicamos; devolvemos la
-    #     que ya existe (idempotente). Esto es lo que corrige el doble-agendado cuando el
-    #     modelo llamaba a agendar dos veces (reintentos, "sí confírmame", etc.).
-    #   • Traslape de OTRA clienta → el horario está ocupado: se rechaza para que Sofía
-    #     ofrezca otra hora (nunca dos citas encimadas en el mismo espacio).
-    # No depende del prompt: aunque el modelo insista, la agenda no se duplica.
-    tel_digits = "".join(c for c in tel if c.isdigit())
-    try:
-        dia_ini = datetime.combine(inicio.date(), time(0, 0), tzinfo=TZ)
-        dia_fin = dia_ini + timedelta(days=1)
-        existentes = (
-            svc.events()
-            .list(
-                calendarId=CALENDAR_ID,
-                timeMin=dia_ini.isoformat(),
-                timeMax=dia_fin.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        ).get("items", [])
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"No se pudieron revisar traslapes antes de agendar: {e}")
-        existentes = []
+    # Se revisa el traslape contra TODOS los calendarios de servicio:
+    #   • Traslape de ESTA MISMA clienta → ya tenía cita: NO duplicamos (idempotente).
+    #   • Traslape de OTRA clienta → el horario está ocupado: se rechaza.
+    existentes = [ev for _cal, ev in _eventos_dia_todos(svc, inicio.date())]
 
     for ev in existentes:
         if ev.get("status") == "cancelled":
@@ -417,35 +499,23 @@ def crear_cita(
         "start": {"dateTime": inicio.isoformat(), "timeZone": str(TZ)},
         "end": {"dateTime": fin.isoformat(), "timeZone": str(TZ)},
         "status": "tentative",
-        "colorId": "5",  # amarillo = por confirmar
+        # Sin colorId: la cita hereda el color del calendario del servicio.
         "reminders": {"useDefault": True},
     }
     try:
-        ev = svc.events().insert(calendarId=CALENDAR_ID, body=cuerpo).execute()
+        ev = svc.events().insert(calendarId=cal_destino, body=cuerpo).execute()
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Error creando la cita: {e}")
+        logger.error(f"Error creando la cita en {cal_destino}: {e}")
         return {"ok": False, "error": "No se pudo guardar en la agenda."}
 
     # ── Recheck anti-carrera ─────────────────────────────────────────────
-    # El candado previo no basta si DOS clientas distintas caen al mismo hueco casi al
-    # mismo tiempo (las dos leyeron "libre" antes de que la otra insertara). Volvemos a
-    # leer el día: si otra cita de OTRA clienta se traslapa y se creó ANTES que la nuestra,
-    # ella gana el hueco y borramos la nuestra para no empalmar.
+    # Si DOS clientas distintas caen al mismo hueco casi al mismo tiempo, volvemos a leer
+    # TODOS los calendarios: si otra cita de OTRA clienta se traslapa y se creó ANTES que la
+    # nuestra, ella gana el hueco y borramos la nuestra para no empalmar.
     try:
         nuestro_id = ev.get("id", "")
         nuestro_created = ev.get("created", "")
-        recheck = (
-            svc.events()
-            .list(
-                calendarId=CALENDAR_ID,
-                timeMin=dia_ini.isoformat(),
-                timeMax=dia_fin.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        ).get("items", [])
-        for otro in recheck:
+        for _cal, otro in _eventos_dia_todos(svc, inicio.date()):
             if otro.get("id") == nuestro_id or otro.get("status") == "cancelled":
                 continue
             s = otro.get("start", {}).get("dateTime")
@@ -460,11 +530,10 @@ def crear_cita(
             if inicio < of and fin > oi:  # se traslapan
                 od = "".join(c for c in otro.get("description", "") if c.isdigit())
                 if tel_digits and tel_digits in od:
-                    continue  # es otra cita de la MISMA clienta, no un empalme con alguien más
+                    continue  # otra cita de la MISMA clienta, no un empalme con alguien más
                 if otro.get("created", "") < nuestro_created:
-                    # La otra clienta llegó primero: cedemos el hueco y quitamos la nuestra.
                     try:
-                        svc.events().delete(calendarId=CALENDAR_ID, eventId=nuestro_id).execute()
+                        svc.events().delete(calendarId=cal_destino, eventId=nuestro_id).execute()
                     except Exception:  # noqa: BLE001
                         pass
                     logger.info(f"Carrera: se cede el hueco {inicio.isoformat()} a una cita previa")
@@ -477,16 +546,15 @@ def crear_cita(
 
     dia_txt = _DIAS[inicio.weekday()]
     cuando = f"{dia_txt} {inicio.day} a las {inicio.strftime('%H:%M')}"
-    logger.info(f"Cita creada en calendario: {cuerpo['summary']} @ {inicio.isoformat()}")
+    logger.info(f"Cita creada en {cal_destino}: {cuerpo['summary']} @ {inicio.isoformat()}")
     return {"ok": True, "cuando": cuando, "link": ev.get("htmlLink", "")}
 
 
 def buscar_citas_de(telefono: str, dias_adelante: int = 90) -> list[dict]:
     """
-    Devuelve las próximas citas de UNA clienta (identificada por su WhatsApp), para
-    poder cancelar/reagendar. Filtra por el teléfono guardado en la descripción del evento.
-
-    Cada item: {"evento_id", "cuando", "servicio", "titulo"}.
+    Próximas citas de UNA clienta (por su WhatsApp), en TODOS los calendarios, para
+    cancelar/reagendar. Cada item: {"evento_id", "cuando", "servicio", "titulo"}.
+    El evento_id incluye el calendario (para poder cancelarlo después).
     """
     svc = _obtener_servicio()
     if not svc:
@@ -496,52 +564,43 @@ def buscar_citas_de(telefono: str, dias_adelante: int = 90) -> list[dict]:
         return []
     ahora = datetime.now(TZ)
     fin = ahora + timedelta(days=dias_adelante)
-    try:
-        resp = (
-            svc.events()
-            .list(
-                calendarId=CALENDAR_ID,
-                timeMin=ahora.isoformat(),
-                timeMax=fin.isoformat(),
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error buscando citas: {e}")
-        return []
 
     citas = []
-    for ev in resp.get("items", []):
-        desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
-        if tel_digits not in desc_digits:
-            continue
-        ini = ev.get("start", {}).get("dateTime")
-        if not ini:
-            continue
-        try:
-            di = datetime.fromisoformat(ini).astimezone(TZ)
-        except ValueError:
-            continue
-        # Extrae el servicio del summary: "Cita (por confirmar) - <servicio> - <nombre>"
-        partes = ev.get("summary", "").split(" - ")
-        servicio = partes[1] if len(partes) >= 2 else ev.get("summary", "cita")
-        citas.append(
-            {
-                "evento_id": ev.get("id", ""),
-                "cuando": f"{_DIAS[di.weekday()]} {di.day} a las {di.strftime('%H:%M')}",
-                "servicio": servicio,
-                "titulo": ev.get("summary", ""),
-            }
-        )
+    for cal_id in _calendarios_disponibilidad():
+        for ev in _listar_eventos(svc, cal_id, ahora.isoformat(), fin.isoformat()):
+            if ev.get("status") == "cancelled":
+                continue
+            desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
+            if tel_digits not in desc_digits:
+                continue
+            ini = ev.get("start", {}).get("dateTime")
+            if not ini:
+                continue
+            try:
+                di = datetime.fromisoformat(ini).astimezone(TZ)
+            except ValueError:
+                continue
+            partes = ev.get("summary", "").split(" - ")
+            servicio = partes[1] if len(partes) >= 2 else ev.get("summary", "cita")
+            citas.append(
+                {
+                    "evento_id": _componer_evento_id(cal_id, ev.get("id", "")),
+                    "cuando": f"{_DIAS[di.weekday()]} {di.day} a las {di.strftime('%H:%M')}",
+                    "servicio": servicio,
+                    "titulo": ev.get("summary", ""),
+                    "_inicio": di,
+                }
+            )
+    citas.sort(key=lambda c: c["_inicio"])
+    for c in citas:
+        c.pop("_inicio", None)
     return citas
 
 
 def cancelar_cita(evento_id: str, telefono: str) -> dict:
     """
-    Cancela (borra) una cita del calendario. Por seguridad SOLO borra si la cita
-    pertenece a esa clienta (su WhatsApp está en la descripción del evento).
+    Cancela (borra) una cita. Por seguridad SOLO borra si la cita pertenece a esa clienta
+    (su WhatsApp está en la descripción). El evento_id trae el calendario codificado.
 
     Retorna {"ok": True, "cuando": "..."} o {"ok": False, "error": "..."}.
     """
@@ -551,16 +610,19 @@ def cancelar_cita(evento_id: str, telefono: str) -> dict:
     if not evento_id:
         return {"ok": False, "error": "Falta el identificador de la cita."}
 
+    cal_id, ev_id = _partir_evento_id(evento_id)
+    if not ev_id:
+        return {"ok": False, "error": "Identificador de cita inválido."}
+
     try:
-        ev = svc.events().get(calendarId=CALENDAR_ID, eventId=evento_id).execute()
+        ev = svc.events().get(calendarId=cal_id, eventId=ev_id).execute()
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Error leyendo la cita a cancelar: {e}")
+        logger.error(f"Error leyendo la cita a cancelar ({cal_id}): {e}")
         return {"ok": False, "error": "No encontré esa cita."}
 
     tel_digits = "".join(c for c in (telefono or "") if c.isdigit())
     desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
     if tel_digits and tel_digits not in desc_digits:
-        # No es la cita de esta clienta: no se toca (evita cancelar la de alguien más).
         return {"ok": False, "error": "Esa cita no está a tu nombre; no puedo cancelarla."}
 
     ini = ev.get("start", {}).get("dateTime")
@@ -573,10 +635,10 @@ def cancelar_cita(evento_id: str, telefono: str) -> dict:
             pass
 
     try:
-        svc.events().delete(calendarId=CALENDAR_ID, eventId=evento_id).execute()
+        svc.events().delete(calendarId=cal_id, eventId=ev_id).execute()
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Error cancelando la cita: {e}")
+        logger.error(f"Error cancelando la cita ({cal_id}): {e}")
         return {"ok": False, "error": "No se pudo cancelar en la agenda."}
 
-    logger.info(f"Cita cancelada en calendario: {ev.get('summary','')} ({evento_id})")
+    logger.info(f"Cita cancelada: {ev.get('summary','')} ({cal_id}/{ev_id})")
     return {"ok": True, "cuando": cuando}
