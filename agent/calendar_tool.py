@@ -65,18 +65,22 @@ _DEFAULT_SERVICE_CALENDARS: list[tuple[str, str, list[str]]] = [
     (
         "masajes",
         "c_f54cdd584a9a7008155f1687943a06c6c4047d22fba1cca8453b9e7c5f1d0488@group.calendar.google.com",
-        ["masaje", "relaj", "descontractur", "sueco", "piedras", "espalda"],
+        ["masaje", "relaj", "descontractur", "sueco", "deportivo", "piedras", "espalda"],
     ),
     (
         "faciales",
         "c_9734a2365fd1b75d5dd8194adcf9aba3c389abcee716a97e4bed2ab79e4bcfc8@group.calendar.google.com",
         ["facial", "rostro", "limpieza", "hidrataci", "mancha", "acné", "acne",
-         "rejuven", "porcelana", "peeling", "dermapen", "piel"],
+         "rejuven", "porcelana", "peeling", "dermapen", "piel", "célula", "celula",
+         "muerta", "exfoli", "expresión", "expresion", "arruga"],
     ),
     (
         "depilacion",
         "c_9d868531d58565c5b3a443bc99d66f207f10300a1502c0234c173002465c1215@group.calendar.google.com",
-        ["depil", "láser", "laser", "cuatridiodo", "axila", "bikini", "ingle", "vello"],
+        # OJO: sin "láser" a secas, porque "lipoláser" es corporal. Se rutea por "depil",
+        # las tecnologías (tridiodo/cuatridiodo/SHR) y las zonas típicas de depilación.
+        ["depil", "tridiodo", "cuatridiodo", "shr", "axila", "bikini", "ingle", "vello",
+         "entrecejo", "patilla", "bigote", "barba", "nuca"],
     ),
     (
         "corporales",
@@ -85,7 +89,8 @@ _DEFAULT_SERVICE_CALENDARS: list[tuple[str, str, list[str]]] = [
          "glúteo", "gluteo", "busto", "estría", "estria", "post-parto", "postparto",
          "tonific", "abdomen", "cintura", "vela", "madero", "maderoterap", "drenaje",
          "linfátic", "linfatic", "radiofrec", "vacum", "vacuum", "gimnasia", "pasiva",
-         "ems", "electromagn"],
+         "ems", "electromagn", "emsculpt", "s-shape", "sshape", "s shape", "lipoláser",
+         "lipolaser", "ultrasonido"],
     ),
     (
         "venta",
