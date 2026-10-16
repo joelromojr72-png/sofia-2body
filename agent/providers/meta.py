@@ -19,6 +19,14 @@ from agent.providers.base import MensajeEntrante, ProveedorWhatsApp
 logger = logging.getLogger("agentkit")
 
 
+def _a_segundos(valor) -> float | None:
+    """Convierte el timestamp de Meta (segundos unix como texto) a número; None si no viene."""
+    try:
+        return float(valor)
+    except (TypeError, ValueError):
+        return None
+
+
 class ProveedorMeta(ProveedorWhatsApp):
     """Proveedor de WhatsApp usando la API oficial de Meta (Cloud API)."""
 
@@ -131,7 +139,7 @@ class ProveedorMeta(ProveedorWhatsApp):
                             mensaje_id=msg.get("id", ""),
                             # Meta solo entrega mensajes entrantes por este canal
                             es_propio=False,
-                            contexto={"evento_id": msg.get("id", "")},
+                            contexto={"evento_id": msg.get("id", ""), "enviado_en": _a_segundos(msg.get("timestamp"))},
                         )
                     )
         return mensajes

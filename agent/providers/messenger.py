@@ -168,7 +168,7 @@ class ProveedorMessenger(ProveedorWhatsApp):
                         texto=texto,
                         mensaje_id=evento_id,
                         es_propio=False,
-                        contexto={"evento_id": evento_id, "psid": psid},
+                        contexto={"evento_id": evento_id, "psid": psid, "enviado_en": (ts / 1000) if isinstance(ts, (int, float)) else None},
                     )
                 )
         return mensajes

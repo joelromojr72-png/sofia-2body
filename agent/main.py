@@ -12,6 +12,7 @@ import os
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time
+import time as _reloj
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -74,6 +75,19 @@ SABADO_EQUIPO = (time(9, 0), time(14, 30))
 # equipo atiende ese día en esa franja y Sofía responde el resto. Fuera de estas fechas
 # rige el horario normal de arriba. Déjalo vacío si no hay excepciones.
 DIAS_ESPECIALES: dict[date, tuple[time, time] | None] = {}
+
+
+MAX_ANTIGUEDAD_MIN = int(os.getenv("SOFIA_MAX_ANTIGUEDAD_MIN") or "30")
+
+
+def mensaje_es_viejo(msg: MensajeEntrante) -> bool:
+    """True si la clienta escribió el mensaje hace más de MAX_ANTIGUEDAD_MIN minutos."""
+    # Si Sofía estuvo caída, Meta reentrega los mensajes horas o días después. Esos NO se
+    # contestan (sería fuera de contexto) y quedan registrados para que los atienda el equipo.
+    enviado_en = msg.contexto.get("enviado_en")
+    if not enviado_en:
+        return False
+    return (_reloj.time() - enviado_en) > MAX_ANTIGUEDAD_MIN * 60
 
 
 def sofia_pausada() -> bool:
@@ -337,6 +351,12 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
         # clienta no agenda, el motor le manda un recordatorio (plantilla) pasadas 24 h,
         # en horario de Sofía (10-19h). No contesta el mismo momento, así no se encima con
         # la charla que el equipo esté teniendo en vivo.
+        if mensaje_es_viejo(msg):
+            if not msg.telefono.startswith("msgr:"):
+                await registrar_inbound_lead(msg.telefono, msg.texto)
+            logger.info(f"[mensaje viejo] no se contesta (> {MAX_ANTIGUEDAD_MIN} min): {msg.telefono}: {msg.texto[:60]}")
+            continue
+
         if en_horario_equipo:
             if not msg.telefono.startswith("msgr:"):
                 await registrar_inbound_lead(msg.telefono, msg.texto)
@@ -414,6 +434,10 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
                 msg.texto, historial, msg.telefono
             )
 
+            if not es_respuesta_real and respuesta == obtener_mensaje_error():
+                logger.warning(f"Sofía no pudo generar respuesta para {msg.telefono}; no se envía nada (lo atiende el equipo)")
+                return
+
             enviado = await prov.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 
             if not enviado:
@@ -435,9 +459,5 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
             logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
 
         except Exception as e:  # noqa: BLE001
-            logger.exception(f"Error procesando el mensaje de {msg.telefono}: {e}")
+            logger.exception(f"Error procesando el mensaje de {msg.telefono} (no se envía nada): {e}")
             await liberar_evento(evento_id)
-            try:
-                await prov.enviar_mensaje(msg.telefono, obtener_mensaje_error(), msg.contexto)
-            except Exception:  # noqa: BLE001
-                logger.error("Tampoco se pudo avisarle al cliente del error")
