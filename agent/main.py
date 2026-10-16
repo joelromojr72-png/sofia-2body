@@ -53,25 +53,26 @@ logger.setLevel(logging.DEBUG if ENVIRONMENT == "development" else logging.INFO)
 PORT = int(os.getenv("PORT", "8000"))
 
 # ── Horario de respuesta de Sofía ──────────────────────────────────────────
-# Sofía SOLO auto-responde los FINES DE SEMANA, y solo en las horas en que 2 Body
-# NO está laborando (cuando no están las humanas). Entre semana (Lun-Vie) NO
-# responde nunca: esos días la atención es 100% del equipo humano.
+# Sofía auto-responde TODOS LOS DÍAS, solo fuera del horario en que 2 Body está
+# laborando (cuando no están las humanas). En esas franjas la atención es 100%
+# del equipo humano.
 #
-#   Sofía RESPONDE:  Sábado fuera de 09:00-14:30  ·  Domingo todo el día
-#   Sofía CALLADA:   Lunes a Viernes (todo el día)  ·  Sábado 09:00-14:30 (atiende el equipo)
+#   Sofía CALLADA:   Lun-Vie 09:00-20:00  ·  Sábado 09:00-14:30 (atiende el equipo)
+#   Sofía RESPONDE:  todo lo demás (noches entre semana, sábado tarde y domingo completo)
 #
 # Aplica a AMBOS canales (WhatsApp siempre; Messenger si MESSENGER_RESPETA_HORARIO=true).
 # Zona horaria de Pachuca. Railway corre en UTC, por eso convertimos explícito.
 TZ_NEGOCIO = ZoneInfo("America/Mexico_City")
 
-# Horario en que el equipo humano atiende el SÁBADO (Sofía responde el resto del sábado).
+# Horario en que el equipo humano atiende (Sofía responde fuera de estas franjas).
+ENTRE_SEMANA_EQUIPO = (time(9, 0), time(20, 0))  # Lunes a Viernes
 SABADO_EQUIPO = (time(9, 0), time(14, 30))
 
 # ── Días especiales (excepciones puntuales al horario normal) ───────────────
 # Para forzar que Sofía RESPONDA un día entre semana concreto (ej. feriado en que el
 # equipo no trabaja), agrega la fecha con valor None. Con una franja (inicio, fin) el
 # equipo atiende ese día en esa franja y Sofía responde el resto. Fuera de estas fechas
-# rige el horario normal (solo fines de semana). Déjalo vacío si no hay excepciones.
+# rige el horario normal de arriba. Déjalo vacío si no hay excepciones.
 DIAS_ESPECIALES: dict[date, tuple[time, time] | None] = {}
 
 
@@ -91,10 +92,9 @@ def sofia_debe_responder(ahora: datetime | None = None) -> bool:
     """
     True si Sofía debe auto-responder ahora.
 
-    Regla: Sofía SOLO responde los FINES DE SEMANA y fuera del horario en que las
-    humanas atienden. Entre semana (Lun-Vie) NO responde nunca (atiende el equipo).
-      Sábado: equipo 09:00-14:30 → Sofía responde el resto del sábado.
-      Domingo: cerrado → Sofía responde todo el día.
+    Regla: Sofía responde TODOS LOS DÍAS, solo fuera del horario en que las humanas
+    atienden. CALLADA Lun-Vie 09:00-20:00 y Sábado 09:00-14:30 (atiende el equipo);
+    RESPONDE todo lo demás (noches entre semana, sábado tarde y domingo completo).
     Las fechas en DIAS_ESPECIALES son excepciones puntuales (p. ej. un feriado entre
     semana en que el equipo no trabaja y sí queremos que Sofía cubra).
     """
@@ -111,8 +111,9 @@ def sofia_debe_responder(ahora: datetime | None = None) -> bool:
 
     dow = ahora.weekday()  # 0=Lun ... 5=Sáb, 6=Dom
 
-    if dow <= 4:  # Lunes a Viernes: Sofía callada todo el día (atiende el equipo)
-        return False
+    if dow <= 4:  # Lunes a Viernes: el equipo atiende ENTRE_SEMANA_EQUIPO; Sofía el resto
+        inicio, fin = ENTRE_SEMANA_EQUIPO
+        return not (inicio <= t < fin)
     if dow == 5:  # Sábado: el equipo atiende SABADO_EQUIPO; Sofía responde el resto
         inicio, fin = SABADO_EQUIPO
         return not (inicio <= t < fin)
