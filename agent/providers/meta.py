@@ -27,6 +27,35 @@ def _a_segundos(valor) -> float | None:
         return None
 
 
+_NOMBRES_MEDIA = {
+    "audio": "un audio", "voice": "un audio", "image": "una imagen", "video": "un video",
+    "document": "un documento", "sticker": "un sticker", "location": "una ubicación",
+    "contacts": "un contacto", "template": "una plantilla",
+}
+
+
+def _texto_de_mensaje(msg: dict) -> str:
+    """Texto escrito de un mensaje de Meta: texto normal, botón de plantilla o respuesta interactiva."""
+    tipo = msg.get("type")
+    if tipo == "text":
+        return ((msg.get("text") or {}).get("body") or "").strip()
+    if tipo == "button":  # la clienta tocó un botón de respuesta rápida de una plantilla
+        return ((msg.get("button") or {}).get("text") or "").strip()
+    if tipo == "interactive":
+        inter = msg.get("interactive") or {}
+        sel = inter.get("button_reply") or inter.get("list_reply") or {}
+        return (sel.get("title") or "").strip()
+    return ""
+
+
+def _describir_media(msg: dict, quien: str) -> str:
+    """Resumen legible de un mensaje que no es texto, para el historial: '[La clienta envió un audio]'."""
+    tipo = msg.get("type") or "mensaje"
+    nombre = _NOMBRES_MEDIA.get(tipo, "un mensaje que no es texto")
+    caption = ((msg.get(tipo) or {}).get("caption") or "").strip() if isinstance(msg.get(tipo), dict) else ""
+    return f"[{quien} envió {nombre}{': ' + caption if caption else ''}]"
+
+
 class ProveedorMeta(ProveedorWhatsApp):
     """Proveedor de WhatsApp usando la API oficial de Meta (Cloud API)."""
 
@@ -110,36 +139,50 @@ class ProveedorMeta(ProveedorWhatsApp):
                 value = change.get("value") or {}
 
                 # 1) Echoes del equipo humano (coexistencia): el negocio escribió desde la app.
-                #    La conversación es con `to` (el cliente); el texto lo dijo una persona.
+                #    La conversación es con `to` (el cliente). Se capturan TODOS los tipos
+                #    (texto, imagen, audio, documento, sticker…): aunque el equipo solo mande
+                #    una foto de la promo, ya está atendiendo y Sofía no debe escribir encima.
                 for eco in value.get("message_echoes", []):
-                    if eco.get("type") != "text":
-                        continue
                     cliente = eco.get("to", "")
                     if not cliente:
                         continue
                     eco_id = eco.get("id", "")
+                    texto_eco = _texto_de_mensaje(eco) or _describir_media(eco, "El equipo")
                     mensajes.append(
                         MensajeEntrante(
                             telefono=cliente,
-                            texto=(eco.get("text") or {}).get("body", ""),
+                            texto=texto_eco,
                             mensaje_id=eco_id,
                             es_propio=False,  # main.py lo enruta por 'tipo', no lo contesta
                             contexto={"evento_id": f"eco:{eco_id}", "tipo": "echo_equipo"},
                         )
                     )
 
-                # 2) Mensajes entrantes normales del cliente.
+                # 2) Mensajes entrantes del cliente. Texto y botones se contestan normal; los
+                #    audios/fotos/archivos se marcan como 'media' para que main.py le pida
+                #    con amabilidad que lo escriba (Sofía no puede escucharlos ni verlos).
                 for msg in value.get("messages", []):
-                    if msg.get("type") != "text":
-                        continue  # por ahora solo texto
+                    tipo_msg = msg.get("type")
+                    if tipo_msg in ("reaction", "unsupported", "system", "ephemeral"):
+                        continue  # reacciones (👍 sobre un mensaje) y avisos: no se contestan
+                    texto = _texto_de_mensaje(msg)
+                    contexto = {
+                        "evento_id": msg.get("id", ""),
+                        # Hora en que la clienta lo escribió (segundos unix). Sirve
+                        # para no contestar mensajes viejos que Meta reentrega tarde.
+                        "enviado_en": _a_segundos(msg.get("timestamp")),
+                    }
+                    if not texto:
+                        texto = _describir_media(msg, "La clienta")
+                        contexto["tipo"] = "media"
                     mensajes.append(
                         MensajeEntrante(
                             telefono=msg.get("from", ""),
-                            texto=(msg.get("text") or {}).get("body", ""),
+                            texto=texto,
                             mensaje_id=msg.get("id", ""),
                             # Meta solo entrega mensajes entrantes por este canal
                             es_propio=False,
-                            contexto={"evento_id": msg.get("id", ""), "enviado_en": _a_segundos(msg.get("timestamp"))},
+                            contexto=contexto,
                         )
                     )
         return mensajes

@@ -57,9 +57,49 @@ def _en_horario(now: datetime | None = None) -> bool:
 
 
 def _en_horario_nudge(now: datetime | None = None) -> bool:
-    """Toque de cierre dentro de 24h: 09:00-21:00 todos los días (más amplio, es reenganche)."""
+    """
+    Toque de cierre dentro de 24 h: 09:00-21:00 y SOLO en horario de Sofía (fuera del horario
+    del equipo). Es un mensaje libre escrito por la IA: en horario de equipo se encimaría con lo
+    que las humanas estén platicando en vivo.
+    """
     now = now or datetime.now(TZ)
-    return 9 <= now.hour < 21
+    if not (9 <= now.hour < 21):
+        return False
+    try:
+        from agent.main import sofia_debe_responder  # import diferido (evita ciclo)
+
+        return sofia_debe_responder(now)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _telefonos_con_cita() -> set[str] | None:
+    """Teléfonos (10 dígitos) con cita en el calendario. None si no se pudo leer."""
+    try:
+        from agent import calendar_tool
+
+        if not calendar_tool.calendario_configurado():
+            return set()
+        return await asyncio.to_thread(calendar_tool.telefonos_con_cita)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"No se pudo leer el calendario para el seguimiento: {e}")
+        return None
+
+
+async def _puede_escribirle(tel: str, con_cita: set[str] | None, para: str) -> bool:
+    """
+    Último candado antes de un mensaje proactivo: el lead sigue activo, nadie del equipo le
+    escribió y NO tiene cita en el calendario. Si ya tiene cita, se marca como agendado.
+    """
+    if not await memory.lead_sigue_elegible(tel, para):
+        return False
+    if con_cita is None:
+        return False  # sin calendario no sabemos si ya agendó: mejor no escribir
+    if "".join(c for c in tel if c.isdigit())[-10:] in con_cita:
+        await memory.marcar_lead_agendado(tel)
+        logger.info(f"Seguimiento cancelado: {tel} ya tiene cita en el calendario")
+        return False
+    return True
 
 
 async def _ciclo_nudge(proveedor) -> int:
@@ -70,11 +110,20 @@ async def _ciclo_nudge(proveedor) -> int:
     from agent import brain, memory  # import diferido para evitar ciclos al cargar
 
     leads = await memory.leads_para_nudge()
+    if not leads:
+        return 0
+    con_cita = await _telefonos_con_cita()
     enviados = 0
     for l in leads:
         tel = l["telefono"]
+        if not await _puede_escribirle(tel, con_cita, "nudge"):
+            continue
         historial = await memory.obtener_historial(tel)
         texto = await brain.generar_seguimiento(historial)
+        # Re-chequeo justo antes de enviar: generar el texto tarda unos segundos y en ese
+        # lapso pudo escribir alguien del equipo.
+        if texto and not await memory.lead_sigue_elegible(tel, "nudge"):
+            continue
         if not texto:
             # no marcamos enviado: se reintenta el próximo ciclo
             continue
@@ -99,8 +148,13 @@ async def _ciclo(proveedor) -> int:
     lang = _lang()
     con_nombre = os.getenv("FOLLOWUP_WITH_NAME", "1") == "1"
     leads = await memory.leads_para_seguimiento()
+    if not leads:
+        return 0
+    con_cita = await _telefonos_con_cita()
     enviados = 0
     for l in leads:
+        if not await _puede_escribirle(l["telefono"], con_cita, "seguimiento"):
+            continue
         etapa = l["etapa"]
         if etapa >= len(templates):
             continue
@@ -213,7 +267,7 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
         logger.warning("El proveedor no soporta plantillas: seguimiento/confirmaciones no disponibles.")
         return
     logger.info(
-        "Seguimiento ACTIVADO — toque de cierre 24h (9-21h) + multi-día por plantilla "
+        "Seguimiento ACTIVADO — toque de cierre 24h (9-21h, solo horario de Sofía) + multi-día por plantilla "
         "(+24h/+3d/+7d, 10-19h lun-sáb)."
         + (" + confirmación de citas el día antes (horario de Sofía, 9-21h)."
            if _confirm_habilitado() else "")

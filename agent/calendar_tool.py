@@ -556,6 +556,35 @@ def crear_cita(
     return {"ok": True, "cuando": cuando, "link": ev.get("htmlLink", "")}
 
 
+def telefonos_con_cita(dias_atras: int = 1, dias_adelante: int = 60) -> set[str]:
+    """
+    Últimos 10 dígitos de cada teléfono que aparece en una cita (título o descripción) de
+    CUALQUIER calendario, de ayer a 60 días. Lo usa el seguimiento para NO mandarle
+    recordatorios a quien ya tiene cita (aunque la haya agendado el equipo a mano y Sofía no
+    se haya enterado). Se lee una vez por ciclo.
+    """
+    import re
+
+    svc = _obtener_servicio()
+    if not svc:
+        return set()
+    ahora = datetime.now(TZ)
+    ini = (ahora - timedelta(days=dias_atras)).isoformat()
+    fin = (ahora + timedelta(days=dias_adelante)).isoformat()
+    tels: set[str] = set()
+    for cal_id in _calendarios_disponibilidad():
+        for ev in _listar_eventos(svc, cal_id, ini, fin):
+            if ev.get("status") == "cancelled":
+                continue
+            texto = f"{ev.get('summary', '')} {ev.get('description', '')}"
+            # Números de 10+ dígitos aunque vengan con espacios o guiones (771 842 5808).
+            for m in re.findall(r"(?:\d[\s\-]?){10,13}", texto):
+                digitos = re.sub(r"\D", "", m)
+                if len(digitos) >= 10:
+                    tels.add(digitos[-10:])
+    return tels
+
+
 def buscar_citas_de(telefono: str, dias_adelante: int = 90) -> list[dict]:
     """
     Próximas citas de UNA clienta (por su WhatsApp), en TODOS los calendarios, para

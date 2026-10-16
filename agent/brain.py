@@ -162,6 +162,19 @@ def cargar_config_prompts() -> dict:
         return {}
 
 
+# Último resultado del cerebro, para el health check (detectar a tiempo, p. ej., saldo agotado).
+estado_cerebro: dict = {"ultimo_ok": None, "ultimo_error": None, "detalle_error": None}
+
+
+def _marcar_cerebro(ok: bool, detalle: str = "") -> None:
+    ahora_iso = datetime.now(TZ).isoformat(timespec="seconds")
+    if ok:
+        estado_cerebro["ultimo_ok"] = ahora_iso
+    else:
+        estado_cerebro["ultimo_error"] = ahora_iso
+        estado_cerebro["detalle_error"] = detalle[:300]
+
+
 def cargar_system_prompt() -> str:
     """El system prompt: quien es el agente y que sabe del negocio."""
     return cargar_config_prompts().get(
@@ -467,6 +480,7 @@ async def generar_respuesta(
                 f"Respuesta generada con {MODELO} "
                 f"({respuesta.usage.input_tokens} in / {respuesta.usage.output_tokens} out)"
             )
+            _marcar_cerebro(True)
             return texto, True
 
         logger.error("Se agotaron las vueltas de tool use sin respuesta final")
@@ -474,6 +488,7 @@ async def generar_respuesta(
 
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error llamando a Claude: {e}")
+        _marcar_cerebro(False, str(e))
         return obtener_mensaje_error(), False
 
 
@@ -503,6 +518,7 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
         )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error generando seguimiento: {e}")
+        _marcar_cerebro(False, str(e))
         return None
     texto = _extraer_texto(r)
     return texto or None

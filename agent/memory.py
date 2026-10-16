@@ -111,6 +111,9 @@ class Lead(Base):
     # Si es True, el seguimiento automático (toque y multi-día) NO le manda nada: la relación
     # ya la lleva una persona y Sofía no debe escribirle encima.
     equipo_atendio: Mapped[bool] = mapped_column(default=False, index=True)
+    # Última vez que una persona del EQUIPO le escribió (echo). Sirve para que Sofía no se
+    # meta en una charla que el equipo lleva en vivo (p. ej. alguien sigue contestando 8:05 pm).
+    ultimo_equipo_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
@@ -140,12 +143,14 @@ async def _migrar_columnas_nudge():
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_en TIMESTAMPTZ",
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_enviado BOOLEAN DEFAULT FALSE",
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS equipo_atendio BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS ultimo_equipo_en TIMESTAMPTZ",
         ]
     else:  # sqlite u otros: intentar agregar, ignorar si ya existe
         stmts = [
             "ALTER TABLE leads ADD COLUMN nudge_en TIMESTAMP",
             "ALTER TABLE leads ADD COLUMN nudge_enviado BOOLEAN DEFAULT 0",
             "ALTER TABLE leads ADD COLUMN equipo_atendio BOOLEAN DEFAULT 0",
+            "ALTER TABLE leads ADD COLUMN ultimo_equipo_en TIMESTAMP",
         ]
     for s in stmts:
         try:
@@ -334,7 +339,7 @@ async def registrar_inbound_lead(telefono: str, texto: str = "") -> None:
         elif lead.estado != "opt_out":
             # ¿Es una conversación NUEVA (pasaron horas desde el último mensaje)?
             gap_grande = bool(
-                lead.last_inbound and (ahora() - lead.last_inbound) > timedelta(hours=8)
+                lead.last_inbound and (ahora() - _aware(lead.last_inbound)) > timedelta(hours=8)
             )
             if gap_grande:
                 lead.nudge_enviado = False  # re-armar el toque para esta nueva charla
@@ -373,12 +378,48 @@ async def registrar_outbound_equipo(telefono: str) -> None:
     async with async_session() as s:
         lead = await s.get(Lead, telefono)
         if lead is None:
-            return
+            # El equipo le escribió PRIMERO (aún no había lead): se crea ya marcado, para que
+            # cuando la clienta conteste Sofía no la meta al seguimiento automático.
+            lead = Lead(telefono=telefono, creado_en=ahora())
+            s.add(lead)
         lead.last_outbound = ahora()
+        lead.ultimo_equipo_en = ahora()
         lead.nudge_en = None
         lead.nudge_enviado = True
         lead.equipo_atendio = True  # ya la atiende una persona: Sofía no le da seguimiento
         await s.commit()
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    """SQLite devuelve fechas sin zona: se asumen UTC para poder comparar."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+async def equipo_activo_reciente(telefono: str, minutos: int) -> bool:
+    """True si una persona del equipo le escribió a esta clienta en los últimos N minutos."""
+    if not telefono or minutos <= 0:
+        return False
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        ult = _aware(lead.ultimo_equipo_en) if lead else None
+    return bool(ult and (ahora() - ult) < timedelta(minutes=minutos))
+
+
+async def lead_sigue_elegible(telefono: str, para: str = "seguimiento") -> bool:
+    """
+    Re-chequeo FRESCO justo antes de mandar algo proactivo (toque o plantilla): entre que se
+    armó la lista y el envío, una persona del equipo pudo haberle escrito o la clienta pudo
+    haber agendado/pedido baja. Si algo cambió, NO se manda.
+    """
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None or lead.estado != "activo" or lead.equipo_atendio:
+            return False
+        if para == "nudge" and lead.nudge_enviado:
+            return False
+        return True
 
 
 async def marcar_lead_agendado(telefono: str) -> None:

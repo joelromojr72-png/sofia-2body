@@ -20,7 +20,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from agent import followup
-from agent.brain import generar_respuesta, obtener_mensaje_error
+from agent.brain import estado_cerebro, generar_respuesta
 from agent.memory import (
     guardar_mensaje,
     inicializar_db,
@@ -30,6 +30,7 @@ from agent.memory import (
     obtener_historial,
     registrar_inbound_lead,
     registrar_outbound_equipo,
+    equipo_activo_reciente,
     reporte_leads,
     ultimas_conversaciones,
 )
@@ -88,6 +89,38 @@ def mensaje_es_viejo(msg: MensajeEntrante) -> bool:
     if not enviado_en:
         return False
     return (_reloj.time() - enviado_en) > MAX_ANTIGUEDAD_MIN * 60
+
+
+# ── Protecciones extra ──────────────────────────────────────────────────────
+# Si una persona del equipo le escribió a la clienta hace menos de esto, Sofía NO contesta:
+# la charla la lleva el equipo en vivo (p. ej. alguien sigue atendiendo a las 8:05 pm).
+SILENCIO_TRAS_EQUIPO_MIN = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "120")
+
+# Tope de respuestas de Sofía por clienta por hora: corta bucles (otro bot contestándole a
+# Sofía) y abusos que gastarían saldo de Anthropic. Pasado el tope, se calla y lo ve el equipo.
+MAX_RESPUESTAS_HORA = int(os.getenv("SOFIA_MAX_RESPUESTAS_HORA") or "15")
+_respuestas_recientes: dict[str, list[float]] = defaultdict(list)
+
+# Números que NO son clientas (avisos automáticos de Meta, etc.): nunca se les contesta.
+TELEFONOS_IGNORADOS = {
+    t.strip() for t in (os.getenv("SOFIA_IGNORAR_TELEFONOS") or "447710173736").split(",") if t.strip()
+}
+
+# Respuesta fija (sin gastar IA) cuando la clienta manda audio/foto/archivo: Sofía no puede
+# escucharlos ni verlos, así que le pide con amabilidad que lo escriba. Máx 1 vez cada 30 min.
+MENSAJE_MEDIA = os.getenv("SOFIA_MENSAJE_MEDIA") or (
+    "¡Gracias por su mensaje! 💜 Por este medio no puedo escuchar audios ni ver archivos. "
+    "¿Me lo podría escribir? Con gusto le ayudo."
+)
+_media_respondida: dict[str, float] = {}
+
+
+def _excede_tope_respuestas(telefono: str) -> bool:
+    """True si Sofía ya le respondió MAX_RESPUESTAS_HORA veces a esta clienta en la última hora."""
+    ahora_s = _reloj.time()
+    recientes = [t for t in _respuestas_recientes[telefono] if ahora_s - t < 3600]
+    _respuestas_recientes[telefono] = recientes
+    return len(recientes) >= MAX_RESPUESTAS_HORA
 
 
 def sofia_pausada() -> bool:
@@ -212,6 +245,15 @@ async def health_check():
         "status": "ok" if estado_proveedor["ok"] else "degradado",
         "service": "agentkit",
         "sofia_pausada": sofia_pausada(),
+        # Cerebro (Anthropic): si "ultimo_error" es más reciente que "ultimo_ok", Sofía no está
+        # pudiendo contestar (p. ej. saldo agotado) y se está quedando callada.
+        "cerebro": {
+            **estado_cerebro,
+            "ok": not (
+                estado_cerebro.get("ultimo_error")
+                and (estado_cerebro.get("ultimo_ok") or "") < estado_cerebro["ultimo_error"]
+            ),
+        },
         "proveedor": proveedor.__class__.__name__ if proveedor else None,
         "conexion": estado_proveedor,
         "messenger": {
@@ -340,6 +382,9 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
         if msg.es_propio or not msg.texto.strip():
             continue
 
+        if msg.telefono in TELEFONOS_IGNORADOS:
+            continue  # aviso automático (no es una clienta): no se contesta
+
         # La entrega es "al menos una vez": el mismo evento puede llegar dos veces
         evento_id = msg.contexto.get("evento_id") or msg.mensaje_id
         if evento_id and not await marcar_evento_procesado(evento_id):
@@ -363,7 +408,36 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
             logger.info(f"[horario equipo] lead registrado (Sofía no responde): {msg.telefono}")
             continue
 
+        # El equipo le escribió hace poco: la charla la llevan ellos, Sofía no se mete.
+        if await equipo_activo_reciente(msg.telefono, SILENCIO_TRAS_EQUIPO_MIN):
+            if not msg.telefono.startswith("msgr:"):
+                await registrar_inbound_lead(msg.telefono, msg.texto)
+            logger.info(
+                f"[equipo en vivo] Sofía no responde (el equipo escribió hace < "
+                f"{SILENCIO_TRAS_EQUIPO_MIN} min): {msg.telefono}"
+            )
+            continue
+
+        if _excede_tope_respuestas(msg.telefono):
+            logger.warning(f"[tope] {msg.telefono} superó {MAX_RESPUESTAS_HORA} respuestas/hora; Sofía se calla")
+            continue
+
+        # Audio / foto / archivo: respuesta fija pidiendo que lo escriba (sin IA), 1 vez/30 min.
+        if msg.contexto.get("tipo") == "media":
+            if not msg.telefono.startswith("msgr:"):
+                await registrar_inbound_lead(msg.telefono, "")
+            await guardar_mensaje(msg.telefono, "user", msg.texto)
+            ultima = _media_respondida.get(msg.telefono, 0)
+            if _reloj.time() - ultima > 1800:
+                if await prov.enviar_mensaje(msg.telefono, MENSAJE_MEDIA, msg.contexto):
+                    _media_respondida[msg.telefono] = _reloj.time()
+                    _respuestas_recientes[msg.telefono].append(_reloj.time())
+                    await guardar_mensaje(msg.telefono, "assistant", MENSAJE_MEDIA)
+                    logger.info(f"Media de {msg.telefono}: se le pidió escribirlo")
+            continue
+
         logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
+        _respuestas_recientes[msg.telefono].append(_reloj.time())
         tareas.add_task(procesar_mensaje, msg, prov)
         encolados += 1
 
@@ -434,7 +508,7 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
                 msg.texto, historial, msg.telefono
             )
 
-            if not es_respuesta_real and respuesta == obtener_mensaje_error():
+            if not es_respuesta_real:
                 logger.warning(f"Sofía no pudo generar respuesta para {msg.telefono}; no se envía nada (lo atiende el equipo)")
                 return
 
