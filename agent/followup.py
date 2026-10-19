@@ -48,18 +48,36 @@ def _lang() -> str:
     return os.getenv("FOLLOWUP_LANG") or "es_MX"
 
 
+def _sofia_de_turno(now: datetime | None = None) -> bool:
+    """
+    True si Sofía está de turno (fuera del horario del equipo humano). El seguimiento
+    solo escribe cuando ella atiende, para no encimarse con el equipo en vivo. Si no se
+    puede determinar, deja pasar (como antes) para no bloquear el reenganche.
+    """
+    try:
+        from agent.main import sofia_debe_responder  # import diferido (evita ciclo)
+
+        return sofia_debe_responder(now)
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def _en_horario(now: datetime | None = None) -> bool:
-    """Plantillas (multi-día): lun-sáb, 10:00-19:00 hora de México."""
+    """Plantillas (multi-día): lun-sáb 10:00-19:00 y SOLO en el turno de Sofía."""
     now = now or datetime.now(TZ)
     if now.weekday() == 6:  # domingo
         return False
-    return 10 <= now.hour < 19
+    if not (10 <= now.hour < 19):
+        return False
+    return _sofia_de_turno(now)
 
 
 def _en_horario_nudge(now: datetime | None = None) -> bool:
-    """Toque de cierre dentro de 24h: 09:00-21:00 todos los días (más amplio, es reenganche)."""
+    """Toque de cierre (24h): 09:00-21:00 y SOLO en el turno de Sofía (fuera del horario del equipo)."""
     now = now or datetime.now(TZ)
-    return 9 <= now.hour < 21
+    if not (9 <= now.hour < 21):
+        return False
+    return _sofia_de_turno(now)
 
 
 async def _ciclo_nudge(proveedor) -> int:
@@ -214,7 +232,7 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
         return
     logger.info(
         "Seguimiento ACTIVADO — toque de cierre 24h (9-21h) + multi-día por plantilla "
-        "(+24h/+3d/+7d, 10-19h lun-sáb)."
+        "(+24h/+3d/+7d, 10-19h lun-sáb), SOLO en el turno de Sofía (fuera del horario del equipo)."
         + (" + confirmación de citas el día antes (horario de Sofía, 9-21h)."
            if _confirm_habilitado() else "")
     )
