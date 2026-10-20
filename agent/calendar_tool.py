@@ -331,11 +331,12 @@ def citas_del_dia(fecha: date) -> list[dict]:
 
 
 def slots_libres(
-    fecha: date, duracion_min: int = 60, paso_min: int = 30, max_slots: int = 8
+    fecha: date, duracion_min: int = 60, paso_min: int = 60, max_slots: int = 8
 ) -> list[str]:
     """
     Horarios de inicio REALMENTE LIBRES de un día (descontando lo ocupado en TODOS los
     calendarios), para que Sofía ofrezca solo huecos que no chocan con ninguna cita.
+    Solo horas EN PUNTO: la clínica agenda cada hora (9:00, 10:00, 11:00...).
     """
     hd = horario_dia(fecha)
     if hd is None:
@@ -354,6 +355,8 @@ def slots_libres(
 
     ahora = datetime.now(TZ)
     t = datetime.combine(fecha, apertura, tzinfo=TZ)
+    if t.minute or t.second:  # arranca siempre en hora en punto
+        t = t.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
     fin_dia = datetime.combine(fecha, cierre, tzinfo=TZ)
     paso = timedelta(minutes=max(5, paso_min))
     d = timedelta(minutes=dur)
@@ -452,6 +455,15 @@ def crear_cita(
             f"-{cierre.strftime('%H:%M')}).",
         }
 
+    # La clínica solo agenda en hora EN PUNTO (no :30). Rechazamos para que Sofía
+    # ofrezca una hora en punto en lugar de meter una cita a la media hora.
+    if inicio.minute != 0 or inicio.second != 0:
+        return {
+            "ok": False,
+            "error": "Solo agendamos en horario en punto (por ejemplo 12:00 o 13:00). "
+            "Ofrece una hora en punto.",
+        }
+
     tel = telefono if telefono.startswith("+") else f"+{telefono}"
     tel_digits = "".join(c for c in tel if c.isdigit())
     cal_destino = _calendario_para_servicio(servicio)
@@ -460,9 +472,9 @@ def crear_cita(
     # Se revisa el traslape contra TODOS los calendarios de servicio:
     #   • Traslape de ESTA MISMA clienta → ya tenía cita: NO duplicamos (idempotente).
     #   • Traslape de OTRA clienta → el horario está ocupado: se rechaza.
-    existentes = [ev for _cal, ev in _eventos_dia_todos(svc, inicio.date())]
+    existentes = list(_eventos_dia_todos(svc, inicio.date()))  # [(cal_id, evento), ...]
 
-    for ev in existentes:
+    for _cal, ev in existentes:
         if ev.get("status") == "cancelled":
             continue
         s = ev.get("start", {}).get("dateTime")
@@ -508,6 +520,42 @@ def crear_cita(
         # Sin colorId: la cita hereda el color del calendario del servicio.
         "reminders": {"useDefault": True},
     }
+    # ── Reagenda = mover, no duplicar ────────────────────────────────────
+    # Si ESTA clienta ya tiene una cita de Sofía del MISMO servicio ese día en otro
+    # horario (sin traslape), es una reprogramación: se MUEVE esa cita al nuevo horario
+    # en vez de crear otra. Evita duplicados como 9:30 / 10:30 / 11:30 de la misma
+    # persona el mismo día. Solo toca citas que tomó Sofía, nunca las del equipo.
+    mismos = []
+    for cal_id, ev_x in existentes:
+        if ev_x.get("status") == "cancelled":
+            continue
+        if cal_id != cal_destino or not ev_x.get("start", {}).get("dateTime"):
+            continue
+        desc_x = ev_x.get("description", "")
+        if "Sofía" not in desc_x and "bot de WhatsApp" not in desc_x:
+            continue
+        if tel_digits and tel_digits in "".join(c for c in desc_x if c.isdigit()):
+            mismos.append((cal_id, ev_x))
+
+    if mismos:
+        cal_id, ev_mover = mismos[0]
+        for cal_extra, ev_extra in mismos[1:]:  # limpia duplicados previos de la misma clienta
+            try:
+                svc.events().delete(calendarId=cal_extra, eventId=ev_extra.get("id", "")).execute()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            ev = svc.events().update(
+                calendarId=cal_id, eventId=ev_mover.get("id", ""), body=cuerpo
+            ).execute()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error reagendando la cita en {cal_id}: {e}")
+            return {"ok": False, "error": "No se pudo reagendar la cita."}
+        dia_txt = _DIAS[inicio.weekday()]
+        cuando = f"{dia_txt} {inicio.day} a las {inicio.strftime('%H:%M')}"
+        logger.info(f"Cita reagendada (movida) en {cal_id} @ {inicio.isoformat()}")
+        return {"ok": True, "reagendada": True, "cuando": cuando, "link": ev.get("htmlLink", "")}
+
     try:
         ev = svc.events().insert(calendarId=cal_destino, body=cuerpo).execute()
     except Exception as e:  # noqa: BLE001
