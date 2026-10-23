@@ -144,7 +144,7 @@ def _leer_agenda(dias_atras: int = 150, dias_adelante: int = 180) -> list[dict]:
 _OTRA_AGENCIA = [
     t.strip().lower()
     for t in (os.getenv("ANUNCIOS_OTRA_AGENCIA")
-              or "Solicita tu precio especial aquí|Hidrofacial con 50% por apertura").split("|")
+              or "Solicita tu precio especial aquí").split("|")
     if t.strip()
 ]
 
