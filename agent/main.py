@@ -345,6 +345,25 @@ async def registrar_origen_manual(key: str = "", tel: str = "", titulo: str = ""
     return {"ok": True, "telefono": tel_wa, "titulo": titulo, "otra_agencia": atribucion.es_de_otra_agencia(titulo)}
 
 
+@app.post("/admin/directorio")
+async def cargar_directorio(request: Request, key: str = "", fuente: str = "anegocios"):
+    """
+    Carga/reemplaza el directorio de clientas (nombre → teléfono), p. ej. exportado de
+    Anegocios. Cuerpo JSON: [{"nombre": "...", "telefono": "..."}]. Protegido con clave.
+    Sirve para el recordatorio del día antes de citas que el equipo apuntó solo con nombre.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from agent.memory import reemplazar_directorio
+
+    items = await request.json()
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="se espera una lista")
+    n = await reemplazar_directorio(items, fuente=fuente[:40])
+    return {"ok": True, "guardados": n, "fuente": fuente}
+
+
 @app.get("/admin/export")
 async def export_conversaciones(key: str = ""):
     """Exporta TODAS las conversaciones de WhatsApp y los leads (para análisis de ventas). Protegido."""
@@ -517,6 +536,9 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
         if en_horario_equipo:
             if not msg.telefono.startswith("msgr:"):
                 await registrar_inbound_lead(msg.telefono, msg.texto)
+                # Se guarda en el historial para que Sofía tenga TODO el contexto (lo que dijo
+                # la clienta y lo que contestó el equipo) si después le manda un recordatorio.
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
             logger.info(f"[horario equipo] lead registrado (Sofía no responde): {msg.telefono}")
             continue
 
@@ -524,6 +546,7 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
         if await equipo_activo_reciente(msg.telefono, SILENCIO_TRAS_EQUIPO_MIN):
             if not msg.telefono.startswith("msgr:"):
                 await registrar_inbound_lead(msg.telefono, msg.texto)
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
             logger.info(
                 f"[equipo en vivo] Sofía no responde (el equipo escribió hace < "
                 f"{SILENCIO_TRAS_EQUIPO_MIN} min): {msg.telefono}"

@@ -492,6 +492,48 @@ async def generar_respuesta(
         return obtener_mensaje_error(), False
 
 
+NO_ENVIAR = "NO_ENVIAR"
+
+
+async def generar_recordatorio_equipo(historial: list[dict]) -> str | None:
+    """
+    Recordatorio LIGERO en una charla que lleva el EQUIPO humano: la clienta no contestó el
+    último mensaje del equipo en unas horas. Sofía retoma justo eso, en el tono del equipo.
+    Devuelve el texto, NO_ENVIAR si la charla ya terminó de forma natural, o None si falló.
+    """
+    if not historial or historial[-1]["role"] != "assistant":
+        return NO_ENVIAR  # no hay un mensaje del equipo esperando respuesta
+    system_prompt = cargar_system_prompt() + _contexto_temporal()
+    instruccion = (
+        "[NOTA INTERNA — no la menciones: esta charla la lleva una persona del EQUIPO de 2Body. "
+        "La clienta no ha contestado el ÚLTIMO mensaje del equipo desde hace unas horas. Escribe "
+        "UN recordatorio LIGERO, de UNA sola línea, que retome justo lo último que el equipo le "
+        "preguntó u ofreció (p. ej. los horarios propuestos), en el MISMO tono y trato que usa el "
+        "equipo en el chat: si el equipo le habla de TÚ, háblale de TÚ (esto manda sobre tu regla "
+        "de usted). Si un horario que ofreció el equipo YA PASÓ (revisa la fecha y hora actuales), "
+        "no lo repitas: ofrécele con suavidad compartirle horarios nuevos. Nada de información "
+        "nueva, precios ni presión, no la "
+        "regañes por no contestar, máximo 1 emoji. Si el último mensaje del equipo le hizo una "
+        "pregunta o propuesta (agendar, horarios, rostro o cuerpo, etc.) que ella no contestó, SÍ "
+        "escribe el recordatorio. Responde EXACTAMENTE NO_ENVIAR solo si la charla ya cerró: ya "
+        "agendó, se despidieron, ella dijo que lo piensa o que avisa, o pidió no escribirle]"
+    )
+    mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
+    mensajes.append({"role": "user", "content": instruccion})
+    try:
+        r = await client.messages.create(
+            model=MODELO, max_tokens=600, system=system_prompt, messages=mensajes
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Error generando recordatorio del equipo: {e}")
+        _marcar_cerebro(False, str(e))
+        return None
+    texto = _extraer_texto(r)
+    if not texto:
+        return None
+    return NO_ENVIAR if NO_ENVIAR in texto else texto
+
+
 async def generar_seguimiento(historial: list[dict]) -> str | None:
     """
     Redacta UN mensaje de reenganche cálido (estilo concierge) para una clienta que dejó la

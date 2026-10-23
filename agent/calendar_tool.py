@@ -416,6 +416,44 @@ def citas_para_confirmar(fecha: date) -> list[dict]:
     return out
 
 
+def eventos_con_hora(fecha: date) -> list[dict]:
+    """
+    TODAS las citas con hora de un día (las de Sofía y las que apuntó el equipo), con el
+    calendario de servicio al que pertenecen. Para el recordatorio del día antes.
+    Cada item: {"evento_id", "calendario", "titulo", "descripcion", "inicio"(datetime)}.
+    """
+    svc = _obtener_servicio()
+    if not svc:
+        return []
+    clave_por_id = {cal_id: clave for clave, cal_id, _ in _SERVICE_CALENDARS}
+    out = []
+    for cal_id, ev in _eventos_dia_todos(svc, fecha):
+        if ev.get("status") == "cancelled":
+            continue
+        ini = (ev.get("start") or {}).get("dateTime")
+        if not ini:
+            continue
+        try:
+            di = datetime.fromisoformat(ini).astimezone(TZ)
+        except ValueError:
+            continue
+        out.append(
+            {
+                "evento_id": _componer_evento_id(cal_id, ev.get("id", "")),
+                "calendario": clave_por_id.get(cal_id, "principal"),
+                "titulo": ev.get("summary", "") or "",
+                "descripcion": ev.get("description", "") or "",
+                "inicio": di,
+            }
+        )
+    return out
+
+
+def cuando_legible(di: datetime) -> str:
+    """'viernes 24 a las 17:00'."""
+    return f"{_DIAS[di.weekday()]} {di.day} a las {di.strftime('%H:%M')}"
+
+
 def crear_cita(
     nombre: str,
     telefono: str,

@@ -202,67 +202,242 @@ def _confirm_template() -> str:
 
 def _debe_confirmar_ahora(now: datetime | None = None) -> bool:
     """
-    Manda confirmaciones SOLO en horario en que Sofía responde (fuera del horario del
-    equipo) y a una hora sensata (9-21h), para no escribir de madrugada.
+    Recordatorio del día antes: es un aviso automático (no una charla), así que corre
+    también en horario del equipo. Todos los días de 10:00 a 20:00.
     """
     now = now or datetime.now(TZ)
-    if not (9 <= now.hour < 21):
-        return False
-    try:
-        from agent.main import sofia_debe_responder  # import diferido (evita ciclo)
+    return 10 <= now.hour < 20
 
-        return sofia_debe_responder(now)
-    except Exception:  # noqa: BLE001
-        return True
+
+_SERVICIO_POR_CALENDARIO = {
+    "faciales": "sesión facial",
+    "corporales": "sesión corporal",
+    "depilacion": "sesión de depilación",
+    "masajes": "masaje",
+    "venta": "valoración",
+    "principal": "cita",
+}
+
+# Palabras que en el título de la cita NO son parte del nombre de la clienta.
+_NO_NOMBRE = {
+    "CITA", "POR", "CONFIRMAR", "SESION", "SIN", "COSTO", "EXP", "UNICA", "EXPERIENCIA",
+    "VALORACION", "FACIAL", "CORPORAL", "MASAJE", "DEPILACION", "LASER", "RA", "DA", "VA",
+    "PRIMERA", "SEGUNDA", "GRATIS", "BODY", "PACHUCA", "PROMO", "PAQUETE", "Y", "DE", "LA",
+    "DEL", "LOS", "LAS", "MA", "EMSCULPT", "HIFU", "HIDROFACIAL", "LIMPIEZA",
+}
+
+
+def _norm(s: str) -> str:
+    import unicodedata
+
+    s = unicodedata.normalize("NFD", s or "")
+    s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^A-Z ]", " ", s.upper())
+
+
+def _tokens_nombre(texto: str) -> list[str]:
+    """Tokens del nombre de la clienta en un título de cita (sin servicio, paréntesis ni números)."""
+    texto = re.sub(r"\(.*?\)", " ", texto or "")
+    mejor: list[str] = []
+    for seg in re.split(r"\s[-.]\s|/|\|", texto):
+        toks = [t for t in _norm(seg).split() if len(t) > 1 and t not in _NO_NOMBRE]
+        if len(toks) > len(mejor):
+            mejor = toks
+    return mejor
+
+
+def _token_igual(a: str, b: str) -> bool:
+    return a == b or (min(len(a), len(b)) >= 5 and (a.startswith(b) or b.startswith(a)))
+
+
+def _buscar_telefono(tokens: list[str], directorio: list[tuple[str, str]]) -> str | None:
+    """
+    Teléfono por nombre: todos los tokens del título (mínimo 2, p. ej. nombre + apellido)
+    deben estar en el nombre del directorio, en cualquier orden. Solo si la coincidencia es
+    única y el teléfono no es compartido por personas distintas (números 'comodín').
+    """
+    if len(tokens) < 2:
+        return None
+    por_tel: dict[str, list[set[str]]] = {}
+    for nombre, tel in directorio:
+        por_tel.setdefault(tel, []).append(set(_norm(nombre).split()))
+    candidatos = set()
+    for tel, nombres in por_tel.items():
+        for dt in nombres:
+            if all(any(_token_igual(t, d) for d in dt) for t in tokens):
+                candidatos.add(tel)
+    if len(candidatos) != 1:
+        return None
+    tel = candidatos.pop()
+    nombres = por_tel[tel]
+    for i in range(len(nombres)):
+        for j in range(i + 1, len(nombres)):
+            if len(nombres[i] & nombres[j]) < 2:
+                return None  # el mismo número es de personas distintas: no se usa
+    return tel
+
+
+def _servicio_de(cita: dict) -> str:
+    desc, titulo = cita["descripcion"], cita["titulo"]
+    m = re.search(r"Servicio:\s*(.+)", desc)
+    if m:
+        return m.group(1).strip()
+    t = _norm(titulo)
+    if re.search(r"\bEXP\b|EXPERIENCIA", t):
+        base = "Experiencia Única"
+        if "FACIAL" in t:
+            return base + " facial"
+        if "CORPORAL" in t:
+            return base + " corporal"
+        return base
+    for palabra, servicio in (("FACIAL", "sesión facial"), ("CORPORAL", "sesión corporal"),
+                              ("DEPIL", "sesión de depilación"), ("MASAJE", "masaje")):
+        if palabra in t:
+            return servicio
+    return _SERVICIO_POR_CALENDARIO.get(cita["calendario"], "cita")
+
+
+async def _citas_de_manana_con_telefono() -> list[dict]:
+    """
+    Citas de MAÑANA (de Sofía y del equipo) agrupadas por clienta, con su teléfono:
+    1) 'WhatsApp: +...' en la descripción (citas de Sofía), 2) un número en el título o la
+    descripción, 3) el directorio de clientas por nombre. Las que no tienen teléfono se omiten.
+    """
+    from agent import calendar_tool, memory
+
+    manana = (datetime.now(TZ) + timedelta(days=1)).date()
+    citas = await asyncio.to_thread(calendar_tool.eventos_con_hora, manana)
+    directorio = await memory.directorio_clientes()
+    por_tel: dict[str, dict] = {}
+    for c in citas:
+        titulo, desc = c["titulo"], c["descripcion"]
+        if re.search(r"cancel|bloque|no disponible", titulo, re.I):
+            continue
+        m = re.search(r"WhatsApp:\s*\+?([0-9]{10,15})", desc)
+        if m:
+            tel = m.group(1)[-10:]
+        else:
+            nums = re.findall(r"(?:\d[\s\-]?){10,13}", titulo + " " + desc)
+            tel = re.sub(r"\D", "", nums[0])[-10:] if nums else ""
+        if len(tel) < 10:
+            tel = _buscar_telefono(_tokens_nombre(titulo), directorio) or ""
+        if not tel:
+            continue
+        m_nom = re.search(r"Cliente:\s*(.+)", desc)
+        toks = _tokens_nombre(titulo)
+        nombre = (m_nom.group(1).strip().split(" ")[0] if m_nom else (toks[0] if toks else "")).title()
+        g = por_tel.setdefault(tel, {"telefono": tel, "nombre": nombre, "inicio": c["inicio"],
+                                     "servicios": [], "eventos": []})
+        g["inicio"] = min(g["inicio"], c["inicio"])
+        g["nombre"] = g["nombre"] or nombre
+        serv = _servicio_de(c)
+        if serv not in g["servicios"]:
+            g["servicios"].append(serv)
+        g["eventos"].append(c["evento_id"])
+    return list(por_tel.values())
 
 
 async def _ciclo_confirmaciones(proveedor) -> int:
     """
-    Manda por WhatsApp (plantilla aprobada) la confirmación de las citas de MAÑANA.
-    Deduplica por evento para no confirmar dos veces la misma cita.
+    Recordatorio del día antes (plantilla aprobada) a TODAS las clientas con cita mañana,
+    las haya agendado Sofía o el equipo. Una sola vez por clienta y día.
     """
-    from agent import memory  # import diferido
-
-    try:
-        from agent import calendar_tool
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"No se pudo cargar calendar_tool para confirmaciones: {e}")
-        return 0
+    from agent import calendar_tool, memory  # import diferido
 
     template = _confirm_template()
     lang = _lang()
     manana = (datetime.now(TZ) + timedelta(days=1)).date()
     try:
-        citas = calendar_tool.citas_para_confirmar(manana)
+        grupos = await _citas_de_manana_con_telefono()
     except Exception as e:  # noqa: BLE001
-        logger.error(f"Error leyendo citas de mañana para confirmar: {e}")
+        logger.error(f"Error leyendo citas de mañana para el recordatorio: {e}")
         return 0
 
     enviados = 0
-    for c in citas:
-        eid = c.get("evento_id")
-        tel = c.get("telefono")
-        if not eid or not tel:
+    for g in grupos:
+        tel10 = g["telefono"]
+        if await memory.estado_lead(tel10) == "opt_out":
             continue
-        dkey = f"conf:{eid}"
-        # marcar_evento_procesado devuelve True solo la primera vez → así se manda 1 sola vez.
+        dkey = f"conf:{tel10}:{manana.isoformat()}"
         if not await memory.marcar_evento_procesado(dkey):
+            continue  # ya se le recordó esta fecha
+        # Compatibilidad: citas que ya se confirmaron con la clave anterior (por evento).
+        ya_confirmada = False
+        for eid in g["eventos"]:
+            if not await memory.marcar_evento_procesado(f"conf:{eid}"):
+                ya_confirmada = True
+        if ya_confirmada:
             continue
-        primer_nombre = (c.get("nombre") or "").strip().split(" ")[0] or "hola"
-        params = [primer_nombre, c.get("servicio", "tu cita"), c.get("cuando", "")]
+        params = [g["nombre"] or "💜", " y ".join(g["servicios"]), calendar_tool.cuando_legible(g["inicio"])]
         try:
-            ok = await proveedor.enviar_plantilla(tel, template, params, lang)
+            ok = await proveedor.enviar_plantilla("521" + tel10, template, params, lang)
         except Exception as e:  # noqa: BLE001
-            logger.error(f"Error enviando confirmación a {tel}: {e}")
+            logger.error(f"Error enviando recordatorio del día antes a {tel10}: {e}")
             ok = False
         if ok:
             enviados += 1
-            logger.info(f"Confirmación de cita enviada a {tel} para {c.get('cuando')}")
+            logger.info(f"Recordatorio del día antes enviado a …{tel10[-4:]} ({params[1]}, {params[2]})")
         else:
             await memory.liberar_evento(dkey)  # soltar para reintentar el próximo ciclo
+            for eid in g["eventos"]:
+                await memory.liberar_evento(f"conf:{eid}")
         await asyncio.sleep(1.5)
     if enviados:
-        logger.info(f"Confirmaciones de cita enviadas este ciclo: {enviados}")
+        logger.info(f"Recordatorios del día antes enviados este ciclo: {enviados}")
+    return enviados
+
+
+# ─────────────── Recordatorio ligero en charlas que lleva el equipo ───────────────
+
+
+def _en_horario_nudge_equipo(now: datetime | None = None) -> bool:
+    """El recordatorio ligero corre también en horario del equipo: todos los días 9:00-21:00."""
+    now = now or datetime.now(TZ)
+    return 9 <= now.hour < 21
+
+
+async def _ciclo_nudge_equipo(proveedor) -> int:
+    """
+    Si la clienta no contestó el último mensaje del EQUIPO en ~3-4 h, Sofía manda UN solo
+    recordatorio ligero que retoma ese mensaje (lee todo el chat, incluido lo del equipo).
+    No escribe si la charla ya terminó de forma natural ni si la clienta ya tiene cita.
+    """
+    from agent import brain, memory  # import diferido
+
+    leads = await memory.leads_para_nudge_equipo()
+    if not leads:
+        return 0
+    con_cita = await _telefonos_con_cita()
+    if con_cita is None:
+        return 0  # sin agenda no sabemos si ya agendó: mejor no escribir
+    enviados = 0
+    for l in leads:
+        tel = l["telefono"]
+        if "".join(c for c in tel if c.isdigit())[-10:] in con_cita:
+            await memory.marcar_nudge_equipo_enviado(tel)
+            continue
+        historial = await memory.obtener_historial(tel)
+        texto = await brain.generar_recordatorio_equipo(historial)
+        if texto is None:
+            continue  # falló la IA: se reintenta el próximo ciclo
+        if texto == brain.NO_ENVIAR:
+            await memory.marcar_nudge_equipo_enviado(tel)
+            logger.info(f"Recordatorio ligero omitido (charla cerrada) …{tel[-4:]}")
+            continue
+        # Re-chequeo: mientras se redactaba pudo contestar la clienta o escribir el equipo.
+        if not await memory.nudge_equipo_sigue_elegible(tel):
+            continue
+        try:
+            ok = await proveedor.enviar_mensaje(tel, texto)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error enviando recordatorio ligero a {tel}: {e}")
+            ok = False
+        if ok:
+            await memory.guardar_mensaje(tel, "assistant", texto)
+            await memory.marcar_nudge_equipo_enviado(tel)
+            enviados += 1
+            logger.info(f"Recordatorio ligero (charla del equipo) enviado a …{tel[-4:]}: {texto[:60]}")
+        await asyncio.sleep(1.5)
     return enviados
 
 
@@ -357,8 +532,9 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
     logger.info(
         "Seguimiento ACTIVADO — toque de cierre 24h (9-21h) + multi-día por plantilla "
         "(+24h/+3d/+7d, 10-19h lun-sáb), SOLO en el turno de Sofía (fuera del horario del equipo)."
-        + (" + confirmación de citas el día antes (horario de Sofía, 9-21h)."
+        + (" + recordatorio el día antes a TODAS las citas (10-20h, también en horario del equipo)."
            if _confirm_habilitado() else "")
+        + " + recordatorio ligero (1 vez) si la clienta no contesta al equipo en 3 h (9-21h)."
     )
     while True:
         try:
@@ -373,7 +549,10 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
                 # 2) Seguimiento multi-día por plantilla aprobada (fuera de 24 h).
                 if _en_horario():
                     await _ciclo(proveedor)
-            # 3) Confirmación de las citas de mañana (plantilla), en horario de Sofía.
+                # 2b) Recordatorio ligero en charlas del equipo (clienta no contestó en 3 h).
+                if _en_horario_nudge_equipo():
+                    await _ciclo_nudge_equipo(proveedor)
+            # 3) Recordatorio del día antes a todas las citas de mañana (plantilla).
             if _confirm_habilitado() and _debe_confirmar_ahora():
                 await _ciclo_confirmaciones(proveedor)
             # 4) Recordatorio el mismo día (2-3 h antes) a primeras visitas.

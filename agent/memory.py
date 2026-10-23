@@ -114,7 +114,26 @@ class Lead(Base):
     # Última vez que una persona del EQUIPO le escribió (echo). Sirve para que Sofía no se
     # meta en una charla que el equipo lleva en vivo (p. ej. alguien sigue contestando 8:05 pm).
     ultimo_equipo_en: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Recordatorio LIGERO en charlas que lleva el EQUIPO: si la clienta no contesta el último
+    # mensaje del equipo en ~3-4 h, Sofía manda UN solo recordatorio (con el contexto del chat).
+    nudge_equipo_enviado: Mapped[bool] = mapped_column(default=False)
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
+
+
+class DirectorioCliente(Base):
+    """
+    Directorio de clientas (nombre → teléfono), p. ej. exportado de Anegocios. Sirve para
+    mandar el recordatorio del día antes a citas que el EQUIPO apuntó en la agenda solo con
+    el nombre (sin teléfono).
+    """
+
+    __tablename__ = "directorio_clientes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nombre: Mapped[str] = mapped_column(String(160))
+    telefono: Mapped[str] = mapped_column(String(20), index=True)
+    fuente: Mapped[str] = mapped_column(String(40), default="anegocios", index=True)
+    actualizado: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
 class OrigenAnuncio(Base):
@@ -208,6 +227,7 @@ async def _migrar_columnas_nudge():
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_enviado BOOLEAN DEFAULT FALSE",
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS equipo_atendio BOOLEAN DEFAULT FALSE",
             "ALTER TABLE leads ADD COLUMN IF NOT EXISTS ultimo_equipo_en TIMESTAMPTZ",
+            "ALTER TABLE leads ADD COLUMN IF NOT EXISTS nudge_equipo_enviado BOOLEAN DEFAULT FALSE",
         ]
     else:  # sqlite u otros: intentar agregar, ignorar si ya existe
         stmts = [
@@ -215,6 +235,7 @@ async def _migrar_columnas_nudge():
             "ALTER TABLE leads ADD COLUMN nudge_enviado BOOLEAN DEFAULT 0",
             "ALTER TABLE leads ADD COLUMN equipo_atendio BOOLEAN DEFAULT 0",
             "ALTER TABLE leads ADD COLUMN ultimo_equipo_en TIMESTAMP",
+            "ALTER TABLE leads ADD COLUMN nudge_equipo_enviado BOOLEAN DEFAULT 0",
         ]
     for s in stmts:
         try:
@@ -407,6 +428,7 @@ async def registrar_inbound_lead(telefono: str, texto: str = "") -> None:
             )
             if gap_grande:
                 lead.nudge_enviado = False  # re-armar el toque para esta nueva charla
+                lead.nudge_equipo_enviado = False  # y el recordatorio ligero del equipo
             lead.estado = "activo"
             lead.last_inbound = ahora()
             lead.etapa_seguimiento = 0
@@ -596,6 +618,96 @@ async def leads_para_nudge(limite: int = 40) -> list[dict]:
         )
         leads = list(r.scalars().all())
     return [{"telefono": l.telefono, "nombre": l.nombre, "interes": l.interes} for l in leads]
+
+
+_NUDGE_EQUIPO_HORAS = float(os.getenv("NUDGE_EQUIPO_HORAS") or "3")
+
+
+async def leads_para_nudge_equipo(limite: int = 40) -> list[dict]:
+    """
+    Charlas que lleva el EQUIPO donde la clienta dejó sin contestar el último mensaje del
+    equipo hace >= NUDGE_EQUIPO_HORAS (3 h), aún dentro de las 24 h de WhatsApp, y todavía
+    no se le mandó el recordatorio ligero en esta charla.
+    """
+    corte = ahora() - timedelta(hours=_NUDGE_EQUIPO_HORAS)
+    limite_ventana = ahora() - timedelta(hours=23)
+    async with async_session() as s:
+        r = await s.execute(
+            select(Lead)
+            .where(
+                Lead.estado == "activo",
+                Lead.equipo_atendio.is_(True),
+                Lead.nudge_equipo_enviado.is_(False),
+                Lead.ultimo_equipo_en.is_not(None),
+                Lead.ultimo_equipo_en > Lead.last_inbound,  # el equipo habló al último
+                Lead.ultimo_equipo_en <= corte,
+                Lead.last_inbound >= limite_ventana,
+            )
+            .order_by(Lead.ultimo_equipo_en)
+            .limit(limite)
+        )
+        leads = list(r.scalars().all())
+    return [{"telefono": l.telefono, "nombre": l.nombre} for l in leads]
+
+
+async def nudge_equipo_sigue_elegible(telefono: str) -> bool:
+    """Re-chequeo justo antes de enviar: la clienta no contestó y el equipo no volvió a escribir."""
+    corte = ahora() - timedelta(hours=_NUDGE_EQUIPO_HORAS)
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None or lead.estado != "activo" or lead.nudge_equipo_enviado:
+            return False
+        ult_eq, ult_in = _aware(lead.ultimo_equipo_en), _aware(lead.last_inbound)
+        return bool(ult_eq and ult_in and ult_eq > ult_in and ult_eq <= corte)
+
+
+async def marcar_nudge_equipo_enviado(telefono: str) -> None:
+    """Un solo recordatorio ligero por charla (se re-arma cuando la clienta vuelve tras horas)."""
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None:
+            return
+        lead.nudge_equipo_enviado = True
+        await s.commit()
+
+
+# ─────────────────── Directorio de clientas (nombre → teléfono) ───────────────────
+
+
+async def reemplazar_directorio(items: list[dict], fuente: str = "anegocios") -> int:
+    """Reemplaza el directorio de una fuente. items: [{"nombre", "telefono"}]. Devuelve cuántos guardó."""
+    filas = []
+    for it in items:
+        nombre = (it.get("nombre") or "").strip()
+        dig = "".join(c for c in str(it.get("telefono") or "") if c.isdigit())
+        if nombre and len(dig) >= 10:
+            filas.append(DirectorioCliente(nombre=nombre[:160], telefono=dig[-10:], fuente=fuente, actualizado=ahora()))
+    async with async_session() as s:
+        await s.execute(delete(DirectorioCliente).where(DirectorioCliente.fuente == fuente))
+        s.add_all(filas)
+        await s.commit()
+    return len(filas)
+
+
+async def directorio_clientes() -> list[tuple[str, str]]:
+    """(nombre, teléfono 10 dígitos) del directorio + los leads de WhatsApp con nombre conocido."""
+    async with async_session() as s:
+        d = (await s.execute(select(DirectorioCliente))).scalars().all()
+        l = (await s.execute(select(Lead).where(Lead.nombre != ""))).scalars().all()
+    out = [(x.nombre, x.telefono) for x in d]
+    for x in l:
+        dig = "".join(c for c in x.telefono if c.isdigit())
+        if len(dig) >= 10:
+            out.append((x.nombre, dig[-10:]))
+    return out
+
+
+async def estado_lead(telefono_10: str) -> str | None:
+    """Estado del lead por los últimos 10 dígitos (p. ej. 'opt_out'), o None si no existe."""
+    async with async_session() as s:
+        r = await s.execute(select(Lead).where(Lead.telefono.like(f"%{telefono_10}")))
+        lead = r.scalars().first()
+    return lead.estado if lead else None
 
 
 async def marcar_nudge_enviado(telefono: str) -> None:
