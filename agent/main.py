@@ -29,6 +29,8 @@ from agent.memory import (
     marcar_evento_procesado,
     obtener_historial,
     registrar_inbound_lead,
+    registrar_origen_anuncio,
+    origenes_anuncio,
     registrar_outbound_equipo,
     equipo_activo_reciente,
     reporte_leads,
@@ -273,6 +275,31 @@ async def leads_report(key: str = ""):
     return await reporte_leads()
 
 
+@app.get("/anuncios")
+async def anuncios_report(key: str = "", dias: int = 60):
+    """
+    Atribución: qué clientas llegaron por qué anuncio de Meta (Click-to-WhatsApp), con su
+    teléfono, fecha y primer mensaje. Base para cruzar con citas y ventas. Protegido con clave.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from datetime import timedelta, timezone as _tz
+
+    desde = datetime.now(_tz.utc) - timedelta(days=max(1, min(dias, 365)))
+    filas = await origenes_anuncio(desde)
+    por_anuncio: dict[str, dict] = {}
+    for f in filas:
+        a = por_anuncio.setdefault(f["ad_id"] or "sin_id", {"titulo": f["titulo"], "clientas": set(), "mensajes": 0})
+        a["clientas"].add(f["telefono"])
+        a["mensajes"] += 1
+    resumen = [
+        {"ad_id": k, "titulo": v["titulo"], "clientas": len(v["clientas"]), "entradas": v["mensajes"]}
+        for k, v in sorted(por_anuncio.items(), key=lambda kv: -len(kv[1]["clientas"]))
+    ]
+    return {"desde": desde.isoformat(), "resumen": resumen, "detalle": filas}
+
+
 @app.post("/admin/recuperar")
 async def recuperar_pendientes(key: str = ""):
     """
@@ -373,6 +400,18 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
                     pass
                 logger.info(f"Equipo humano (coexistencia) → {msg.telefono}: {msg.texto[:60]}")
             continue
+
+        # ¿Llegó tocando un anuncio de Meta? Se guarda SIEMPRE (aunque sea horario de equipo
+        # o Sofía esté pausada): es lo que permite saber qué anuncio trae clientas y ventas.
+        ref = msg.contexto.get("referral")
+        if ref:
+            try:
+                await registrar_origen_anuncio(
+                    msg.telefono, msg.contexto.get("evento_id") or msg.mensaje_id, ref, msg.texto
+                )
+                logger.info(f"[anuncio] {msg.telefono} llegó por el anuncio {ref.get('ad_id')} ({ref.get('titulo', '')[:40]})")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"No se pudo guardar el origen del anuncio: {e}")
 
         # PAUSA global (pruebas): Sofía no responde ni registra seguimiento. El echo del
         # equipo (arriba) sí se sigue guardando para no perder el hilo de la conversación.

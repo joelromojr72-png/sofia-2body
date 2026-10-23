@@ -117,6 +117,70 @@ class Lead(Base):
     creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
+class OrigenAnuncio(Base):
+    """
+    Cada vez que una clienta escribe tocando un ANUNCIO de Meta (Click-to-WhatsApp).
+
+    Meta manda 'referral' en ese mensaje con el id del anuncio y el ctwa_clid (id del clic).
+    Con esto se sabe qué anuncio trajo a cada clienta y, cuando compra, se le puede
+    reportar la venta a Meta para que aparezca en el Administrador de anuncios.
+    """
+
+    __tablename__ = "origen_anuncio"
+
+    evento_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    ad_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    titulo: Mapped[str] = mapped_column(String(200), default="")
+    texto: Mapped[str] = mapped_column(String(300), default="")
+    ctwa_clid: Mapped[str] = mapped_column(String(300), default="")
+    primer_mensaje: Mapped[str] = mapped_column(Text, default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora, index=True)
+
+
+async def registrar_origen_anuncio(telefono: str, evento_id: str, ref: dict, texto: str = "") -> None:
+    """Guarda de qué anuncio llegó la clienta (idempotente por evento)."""
+    if not evento_id:
+        return
+    async with async_session() as session:
+        session.add(
+            OrigenAnuncio(
+                evento_id=evento_id,
+                telefono=telefono,
+                ad_id=ref.get("ad_id", ""),
+                titulo=ref.get("titulo", ""),
+                texto=ref.get("texto", ""),
+                ctwa_clid=ref.get("ctwa_clid", ""),
+                primer_mensaje=(texto or "")[:500],
+                creado_en=ahora(),
+            )
+        )
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+
+
+async def origenes_anuncio(desde: datetime | None = None) -> list[dict]:
+    """Lista los registros de origen por anuncio (para el reporte de atribución)."""
+    async with async_session() as session:
+        q = select(OrigenAnuncio).order_by(OrigenAnuncio.creado_en)
+        if desde is not None:
+            q = q.where(OrigenAnuncio.creado_en >= desde)
+        filas = (await session.execute(q)).scalars().all()
+    return [
+        {
+            "telefono": f.telefono,
+            "ad_id": f.ad_id,
+            "titulo": f.titulo,
+            "ctwa_clid": f.ctwa_clid,
+            "primer_mensaje": f.primer_mensaje,
+            "fecha": _aware(f.creado_en).isoformat() if f.creado_en else "",
+        }
+        for f in filas
+    ]
+
+
 # Cadencia de seguimiento (horas desde el último mensaje del cliente) por etapa.
 # 3 toques máximo, con clase: +24 h, +3 días, +7 días. Más que esto arriesga el número.
 _CADENCIA_HORAS = [24, 72, 168]

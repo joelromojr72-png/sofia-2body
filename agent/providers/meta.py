@@ -172,6 +172,20 @@ class ProveedorMeta(ProveedorWhatsApp):
                         # para no contestar mensajes viejos que Meta reentrega tarde.
                         "enviado_en": _a_segundos(msg.get("timestamp")),
                     }
+                    # Si la clienta llegó tocando un ANUNCIO (Click-to-WhatsApp), Meta manda
+                    # 'referral' en ese primer mensaje: id del anuncio, título y ctwa_clid (el
+                    # identificador del clic, sirve para reportarle a Meta las ventas). Se guarda
+                    # en el lead para saber qué anuncio trajo a cada clienta.
+                    ref = msg.get("referral") or {}
+                    if ref:
+                        contexto["referral"] = {
+                            "ad_id": str(ref.get("source_id") or ""),
+                            "tipo_fuente": ref.get("source_type") or "",
+                            "titulo": (ref.get("headline") or "")[:200],
+                            "texto": (ref.get("body") or "")[:300],
+                            "ctwa_clid": ref.get("ctwa_clid") or "",
+                            "url": ref.get("source_url") or "",
+                        }
                     if not texto:
                         texto = _describir_media(msg, "La clienta")
                         contexto["tipo"] = "media"
