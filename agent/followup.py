@@ -20,6 +20,7 @@ SEGURIDAD DEL NÚMERO: el spam baja la calidad del número y puede banearlo. Por
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -265,6 +266,86 @@ async def _ciclo_confirmaciones(proveedor) -> int:
     return enviados
 
 
+def _recordatorio_template() -> str:
+    return os.getenv("RECORDATORIO_TEMPLATE") or "recordatorio_cita_hoy"
+
+
+# Primeras visitas (las que más faltan): Experiencia Única y valoraciones.
+_PRIMERA_VISITA = re.compile(r"exp\.?\s*[uú]nica|experiencia|valoraci[oó]n", re.I)
+
+
+async def _ciclo_recordatorio_hoy(proveedor) -> int:
+    """
+    Recordatorio EL MISMO DÍA, 2-3 h antes, a las PRIMERAS visitas (Experiencia Única /
+    valoración), las tome Sofía o el equipo. Plantilla aprobada con dirección y botón de
+    "Cómo llegar". Una sola vez por cita. Es un aviso automático (no una charla), por eso
+    corre también en horario del equipo, entre 7:00 y 19:00.
+    """
+    from agent import calendar_tool, memory  # import diferido
+
+    ahora = datetime.now(TZ)
+    if not (7 <= ahora.hour < 19):
+        return 0
+    try:
+        svc = calendar_tool._obtener_servicio()
+        eventos = calendar_tool._eventos_dia_todos(svc, ahora.date()) if svc else []
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Recordatorio del día: no se pudo leer la agenda: {e}")
+        return 0
+
+    enviados = 0
+    for cal_id, ev in eventos:
+        if ev.get("status") == "cancelled":
+            continue
+        ini = (ev.get("start") or {}).get("dateTime")
+        if not ini:
+            continue
+        try:
+            inicio = datetime.fromisoformat(ini).astimezone(TZ)
+        except ValueError:
+            continue
+        faltan_h = (inicio - ahora).total_seconds() / 3600
+        if not (2 <= faltan_h <= 3):
+            continue
+        titulo = ev.get("summary", "") or ""
+        desc = ev.get("description", "") or ""
+        if "cancel" in titulo.lower() or not (_PRIMERA_VISITA.search(titulo) or "Sofía" in desc):
+            continue
+        m = re.search(r"WhatsApp:\s*\+?([0-9]{10,15})", desc)
+        if m:
+            digitos = m.group(1)
+        else:
+            nums = re.findall(r"(?:\d[\s\-]?){10,13}", titulo + " " + desc)
+            digitos = re.sub(r"\D", "", nums[0]) if nums else ""
+        if len(digitos) < 10:
+            continue  # sin teléfono no hay a quién avisar
+        tel = "521" + digitos[-10:]
+        clave = f"rec:{calendar_tool._componer_evento_id(cal_id, ev.get('id', ''))}"
+        if not await memory.marcar_evento_procesado(clave):
+            continue
+        m_nom = re.search(r"Cliente:\s*(.+)", desc)
+        nombre = (m_nom.group(1) if m_nom else re.split(r"\s[-/]\s|/", titulo)[0]).strip().split(" ")[0].title() or "Hola"
+        t = titulo.lower()
+        servicio = "Experiencia Única" if _PRIMERA_VISITA.search(t) and "valoraci" not in t else "valoración sin costo"
+        if "facial" in t:
+            servicio += " facial"
+        elif "corporal" in t:
+            servicio += " corporal"
+        params = [nombre, inicio.strftime("%H:%M"), servicio]
+        try:
+            ok = await proveedor.enviar_plantilla(tel, _recordatorio_template(), params, _lang())
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error enviando recordatorio del día a {tel}: {e}")
+            ok = False
+        if ok:
+            enviados += 1
+            logger.info(f"Recordatorio del día enviado a {tel} ({nombre}, {inicio.strftime('%H:%M')}, {servicio})")
+        else:
+            await memory.liberar_evento(clave)  # p. ej. plantilla aún no aprobada: se reintenta
+        await asyncio.sleep(1.5)
+    return enviados
+
+
 async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
     """Corre en segundo plano dentro del servidor. Revisa cada ~15 min."""
     if not habilitado() and not _confirm_habilitado():
@@ -295,6 +376,9 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
             # 3) Confirmación de las citas de mañana (plantilla), en horario de Sofía.
             if _confirm_habilitado() and _debe_confirmar_ahora():
                 await _ciclo_confirmaciones(proveedor)
+            # 4) Recordatorio el mismo día (2-3 h antes) a primeras visitas.
+            if _confirm_habilitado():
+                await _ciclo_recordatorio_hoy(proveedor)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error en el ciclo de seguimiento: {e}")
         await asyncio.sleep(intervalo_seg)
