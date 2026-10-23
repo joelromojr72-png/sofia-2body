@@ -299,6 +299,35 @@ async def guardar_mensaje(telefono: str, role: str, content: str):
         await session.commit()
 
 
+_SIN_REGISTRO_CLIENTA = (
+    "[La clienta le escribió al negocio; sus mensajes de esa vez no quedaron guardados. "
+    "Abajo está lo que le contestó el equipo.]"
+)
+
+
+async def obtener_historial_equipo(telefono: str, limite: int = 20) -> list[dict]:
+    """
+    Historial para el recordatorio ligero de charlas del EQUIPO: igual que obtener_historial,
+    pero si los mensajes de la clienta no quedaron guardados (antes no se guardaban en horario
+    del equipo) NO se descarta lo que dijo el equipo: se antepone una nota en lugar de ellos.
+    """
+    async with async_session() as session:
+        r = await session.execute(
+            select(Mensaje).where(Mensaje.telefono == telefono).order_by(Mensaje.id.desc()).limit(limite)
+        )
+        mensajes = list(r.scalars().all())
+    mensajes.reverse()
+    salida: list[dict] = []
+    for m in mensajes:
+        if salida and salida[-1]["role"] == m.role:
+            salida[-1]["content"] += "\n" + m.content
+        else:
+            salida.append({"role": m.role, "content": m.content})
+    if salida and salida[0]["role"] != "user":
+        salida.insert(0, {"role": "user", "content": _SIN_REGISTRO_CLIENTA})
+    return salida
+
+
 async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
     """
     Devuelve los ultimos N mensajes de una conversacion, en orden cronologico.

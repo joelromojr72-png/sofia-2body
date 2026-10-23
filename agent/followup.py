@@ -416,7 +416,9 @@ async def _ciclo_nudge_equipo(proveedor) -> int:
         if "".join(c for c in tel if c.isdigit())[-10:] in con_cita:
             await memory.marcar_nudge_equipo_enviado(tel)
             continue
-        historial = await memory.obtener_historial(tel)
+        historial = await memory.obtener_historial_equipo(tel)
+        if not historial:
+            continue  # sin nada guardado de esta charla: no hay contexto para escribirle
         texto = await brain.generar_recordatorio_equipo(historial)
         if texto is None:
             continue  # falló la IA: se reintenta el próximo ciclo
