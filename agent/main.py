@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
-from agent import followup
+from agent import atribucion, followup
 from agent.brain import estado_cerebro, generar_respuesta
 from agent.memory import (
     guardar_mensaje,
@@ -216,6 +216,8 @@ async def lifespan(app: FastAPI):
         # Motor de seguimiento multi-día (dormido salvo FOLLOWUP_ENABLED=true).
         # Solo WhatsApp: usa plantillas de Meta, que no existen en Messenger.
         asyncio.create_task(followup.loop_seguimiento(proveedor))
+        # Atribución: detecta ventas de clientas que llegaron por anuncio y las reporta a Meta.
+        asyncio.create_task(atribucion.loop_ventas())
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
 
@@ -298,6 +300,22 @@ async def anuncios_report(key: str = "", dias: int = 60):
         for k, v in sorted(por_anuncio.items(), key=lambda kv: -len(kv[1]["clientas"]))
     ]
     return {"desde": desde.isoformat(), "resumen": resumen, "detalle": filas}
+
+
+@app.get("/reporte/ventas")
+async def reporte_ventas(key: str = "", dias: int = 7, actualizar: bool = True):
+    """
+    Ventas generadas por los anuncios de Meta (clientas que llegaron por anuncio y luego
+    tuvieron sesión pagada en la agenda). actualizar=true revisa la agenda antes de responder
+    y reporta a Meta las compras nuevas. Protegido con clave.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    ciclo = await atribucion.ciclo_ventas() if actualizar else None
+    rep = await atribucion.reporte(max(1, min(dias, 365)))
+    rep["ciclo"] = ciclo
+    return rep
 
 
 @app.get("/admin/export")
