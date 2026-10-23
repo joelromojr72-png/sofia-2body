@@ -139,23 +139,36 @@ def _leer_agenda(dias_atras: int = 150, dias_adelante: int = 180) -> list[dict]:
 
 # ── Origen por anuncio ──────────────────────────────────────────────────────
 
+# Anuncios que NO son de nuestra agencia (otra agencia también le hizo anuncios a 2Body con
+# el mismo WhatsApp). Se reconocen por el título que Meta manda en el referral. Separados por |.
+_OTRA_AGENCIA = [
+    t.strip().lower()
+    for t in (os.getenv("ANUNCIOS_OTRA_AGENCIA")
+              or "Solicita tu precio especial aquí|Hidrofacial con 50% por apertura").split("|")
+    if t.strip()
+]
+
+
+def es_de_otra_agencia(titulo: str) -> bool:
+    t = (titulo or "").strip().lower()
+    return bool(t) and any(t.startswith(x) for x in _OTRA_AGENCIA)
+
+
 async def _clientas_de_anuncio() -> dict[str, dict]:
-    """teléfono → {fecha, ad_id, titulo, ctwa_clid} de las clientas que llegaron por anuncio."""
+    """
+    teléfono → {fecha, ad_id, titulo, ctwa_clid} de las clientas que llegaron por un anuncio
+    NUESTRO. Solo cuenta el anuncio exacto que guardó Sofía (o que se registró a mano tras
+    verificarlo en la bandeja); ya no se adivina por el saludo, porque el saludo automático es
+    igual en los anuncios de la otra agencia.
+    """
     fuentes: dict[str, dict] = {}
     async with async_session() as s:
         for o in (await s.execute(select(OrigenAnuncio).order_by(OrigenAnuncio.creado_en))).scalars():
-            if o.telefono not in fuentes:  # se queda con el PRIMER anuncio que la trajo
+            if es_de_otra_agencia(o.titulo):
+                continue
+            if o.telefono not in fuentes:  # se queda con el PRIMER anuncio nuestro que la trajo
                 fuentes[o.telefono] = {"fecha": _aware(o.creado_en), "ad_id": o.ad_id,
                                        "titulo": o.titulo, "ctwa_clid": o.ctwa_clid}
-        # Conversaciones de antes de guardar el anuncio: se reconoce el saludo automático.
-        primeros: dict[str, Mensaje] = {}
-        for m in (await s.execute(select(Mensaje).where(Mensaje.role == "user").order_by(Mensaje.id))).scalars():
-            primeros.setdefault(m.telefono, m)
-    for tel, m in primeros.items():
-        if tel in fuentes or tel.startswith("msgr:"):
-            continue
-        if _SALUDO_ANUNCIO.search((m.content or "").strip()):
-            fuentes[tel] = {"fecha": _aware(m.timestamp), "ad_id": "", "titulo": "", "ctwa_clid": ""}
     return fuentes
 
 
@@ -244,7 +257,12 @@ async def ciclo_ventas() -> dict:
     """Detecta ventas nuevas, las guarda y reporta a Meta las que se puedan."""
     ventas = await detectar_ventas()
     nuevas, reportadas = 0, 0
+    vigentes = {d["telefono"] for d in ventas}
     async with async_session() as s:
+        # Quita ventas que ya no aplican (p. ej. clientas de anuncios de la otra agencia).
+        for v in (await s.execute(select(VentaAnuncio))).scalars().all():
+            if v.telefono not in vigentes and not v.reportada_meta:
+                await s.delete(v)
         for d in ventas:
             v = await s.get(VentaAnuncio, d["telefono"])
             if v is None:

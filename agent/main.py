@@ -318,6 +318,33 @@ async def reporte_ventas(key: str = "", dias: int = 7, actualizar: bool = True):
     return rep
 
 
+@app.post("/admin/origen")
+async def registrar_origen_manual(key: str = "", tel: str = "", titulo: str = "", fecha: str = ""):
+    """
+    Registra a mano de qué anuncio llegó una clienta (verificado en la bandeja de Meta, donde
+    el chat dice "Este chat contiene una respuesta a <anuncio>"). Para chats de antes de que
+    Sofía guardara el anuncio. fecha = AAAA-MM-DD del primer mensaje. Protegido con clave.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    digitos = "".join(c for c in tel if c.isdigit())
+    if len(digitos) < 10 or not titulo:
+        raise HTTPException(status_code=400, detail="falta tel o titulo")
+    from datetime import timezone as _tz
+
+    from agent.memory import OrigenAnuncio, async_session
+
+    tel_wa = "521" + digitos[-10:]
+    cuando = datetime.fromisoformat(fecha).replace(tzinfo=_tz.utc) if fecha else datetime.now(_tz.utc)
+    async with async_session() as s:
+        evento = f"manual:{tel_wa}"
+        if await s.get(OrigenAnuncio, evento) is None:
+            s.add(OrigenAnuncio(evento_id=evento, telefono=tel_wa, titulo=titulo[:200], creado_en=cuando))
+            await s.commit()
+    return {"ok": True, "telefono": tel_wa, "titulo": titulo, "otra_agencia": atribucion.es_de_otra_agencia(titulo)}
+
+
 @app.get("/admin/export")
 async def export_conversaciones(key: str = ""):
     """Exporta TODAS las conversaciones de WhatsApp y los leads (para análisis de ventas). Protegido."""
