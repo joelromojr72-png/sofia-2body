@@ -300,6 +300,34 @@ async def anuncios_report(key: str = "", dias: int = 60):
     return {"desde": desde.isoformat(), "resumen": resumen, "detalle": filas}
 
 
+@app.get("/admin/export")
+async def export_conversaciones(key: str = ""):
+    """Exporta TODAS las conversaciones de WhatsApp y los leads (para análisis de ventas). Protegido."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from sqlalchemy import select as _sel
+    from agent.memory import Lead, Mensaje, async_session
+
+    async with async_session() as s:
+        msgs = (await s.execute(_sel(Mensaje).order_by(Mensaje.id))).scalars().all()
+        leads = (await s.execute(_sel(Lead))).scalars().all()
+    return {
+        "mensajes": [
+            {"telefono": m.telefono, "role": m.role, "content": m.content,
+             "ts": m.timestamp.isoformat() if m.timestamp else None}
+            for m in msgs
+        ],
+        "leads": [
+            {"telefono": l.telefono, "nombre": l.nombre, "interes": l.interes, "estado": l.estado,
+             "equipo_atendio": l.equipo_atendio,
+             "creado_en": l.creado_en.isoformat() if l.creado_en else None}
+            for l in leads
+        ],
+        "anuncios": await origenes_anuncio(None),
+    }
+
+
 @app.post("/admin/recuperar")
 async def recuperar_pendientes(key: str = ""):
     """
