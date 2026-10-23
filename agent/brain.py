@@ -513,10 +513,11 @@ async def generar_recordatorio_equipo(historial: list[dict]) -> str | None:
         "de usted). Si un horario que ofreció el equipo YA PASÓ (revisa la fecha y hora actuales), "
         "no lo repitas: ofrécele con suavidad compartirle horarios nuevos. Nada de información "
         "nueva, precios ni presión, no la "
-        "regañes por no contestar, máximo 1 emoji. Si el último mensaje del equipo le hizo una "
-        "pregunta o propuesta (agendar, horarios, rostro o cuerpo, etc.) que ella no contestó, SÍ "
-        "escribe el recordatorio. Responde EXACTAMENTE NO_ENVIAR solo si la charla ya cerró: ya "
-        "agendó, se despidieron, ella dijo que lo piensa o que avisa, o pidió no escribirle]"
+        "regañes por no contestar, máximo 1 emoji. Por defecto SÍ escribes el recordatorio: si "
+        "el equipo le ofreció agendar (aunque sea con 'nos encantaría agendarte…'), le mandó una "
+        "promo, le propuso horarios o le hizo cualquier pregunta que ella no contestó, retómalo. "
+        "Responde EXACTAMENTE NO_ENVIAR SOLO si: ya tiene cita confirmada, ella dijo que lo piensa "
+        "o que ella avisa, pidió no escribirle, o la charla ya cerró con despedida de las dos partes]"
     )
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     mensajes.append({"role": "user", "content": instruccion})

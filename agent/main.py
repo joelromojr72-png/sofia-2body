@@ -364,6 +364,35 @@ async def cargar_directorio(request: Request, key: str = "", fuente: str = "aneg
     return {"ok": True, "guardados": n, "fuente": fuente}
 
 
+@app.post("/admin/nudge_equipo/rearmar")
+async def rearmar_nudge_equipo(key: str = ""):
+    """
+    Vuelve a habilitar el recordatorio ligero en charlas del equipo que siguen esperando
+    respuesta de la clienta (dentro de 24 h). Útil tras ajustar el criterio. Protegido.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from datetime import timedelta as _td
+    from sqlalchemy import update as _upd
+
+    from agent.memory import Lead, ahora, async_session
+
+    async with async_session() as s:
+        r = await s.execute(
+            _upd(Lead)
+            .where(
+                Lead.equipo_atendio.is_(True),
+                Lead.estado == "activo",
+                Lead.ultimo_equipo_en > Lead.last_inbound,
+                Lead.last_inbound >= ahora() - _td(hours=23),
+            )
+            .values(nudge_equipo_enviado=False)
+        )
+        await s.commit()
+    return {"ok": True, "rearmados": r.rowcount}
+
+
 @app.get("/admin/export")
 async def export_conversaciones(key: str = ""):
     """Exporta TODAS las conversaciones de WhatsApp y los leads (para análisis de ventas). Protegido."""
