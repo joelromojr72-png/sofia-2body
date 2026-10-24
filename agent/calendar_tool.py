@@ -141,6 +141,39 @@ def _calendario_para_servicio(texto: str) -> str:
     return _calendario_venta()
 
 
+# ── Empalmar citas de DISTINTO servicio ──────────────────────────────────────
+# Cada servicio tiene su cabina/especialista, así que dos citas a la misma hora SÍ se
+# pueden empalmar si son de servicios distintos (p. ej. un facial y un corporal). Solo
+# chocan si son del MISMO servicio, o si de alguna no se sabe el servicio (cita apuntada
+# solo con el nombre en el calendario principal): ahí se bloquea por seguridad.
+_CATEGORIAS = ("masajes", "faciales", "depilacion", "corporales")
+
+
+def categoria_servicio(texto: str) -> str | None:
+    """Categoría (masajes/faciales/depilacion/corporales) de un texto de servicio, o None."""
+    t = (texto or "").lower()
+    for clave, _cal_id, kws in _SERVICE_CALENDARS:
+        if clave in _CATEGORIAS and any(k in t for k in kws):
+            return clave
+    return None
+
+
+def _categoria_evento(cal_id: str, ev: dict) -> str | None:
+    """Categoría de una cita ya agendada: por su calendario, o por el título/servicio si es de venta o del principal."""
+    clave = next((c for c, cid, _ in _SERVICE_CALENDARS if cid == cal_id), None)
+    if clave in _CATEGORIAS:
+        return clave
+    import re as _re
+
+    m = _re.search(r"Servicio:\s*(.+)", ev.get("description", "") or "")
+    return categoria_servicio((ev.get("summary", "") or "") + " " + (m.group(1) if m else ""))
+
+
+def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:
+    """Dos citas traslapadas chocan si son del mismo servicio o si alguna es de servicio desconocido."""
+    return cat_nueva is None or cat_existente is None or cat_nueva == cat_existente
+
+
 def _calendarios_disponibilidad() -> list[str]:
     """Todos los calendarios que se leen para saber qué horarios están ocupados."""
     ids = [cal_id for _, cal_id, _ in _SERVICE_CALENDARS]
@@ -308,7 +341,7 @@ def citas_del_dia(fecha: date) -> list[dict]:
         return []
 
     citas = []
-    for _cal_id, ev in _eventos_dia_todos(svc, fecha):
+    for cal_id, ev in _eventos_dia_todos(svc, fecha):
         if ev.get("status") == "cancelled":
             continue
         ini = ev.get("start", {}).get("dateTime")
@@ -325,19 +358,22 @@ def citas_del_dia(fecha: date) -> list[dict]:
                 "inicio": di.strftime("%H:%M"),
                 "fin": df.strftime("%H:%M"),
                 "titulo": ev.get("summary", "Ocupado"),
+                "categoria": _categoria_evento(cal_id, ev),
             }
         )
     return citas
 
 
 def slots_libres(
-    fecha: date, duracion_min: int = 60, paso_min: int = 60, max_slots: int = 8
+    fecha: date, duracion_min: int = 60, paso_min: int = 60, max_slots: int = 8, servicio: str = ""
 ) -> list[str]:
     """
-    Horarios de inicio REALMENTE LIBRES de un día (descontando lo ocupado en TODOS los
-    calendarios), para que Sofía ofrezca solo huecos que no chocan con ninguna cita.
+    Horarios de inicio REALMENTE LIBRES de un día para ese servicio, para que Sofía ofrezca
+    solo huecos que no chocan. Una cita de OTRO servicio a la misma hora no estorba (se
+    empalman); sin servicio, cualquier cita ocupa el horario.
     Solo horas EN PUNTO: la clínica agenda cada hora (9:00, 10:00, 11:00...).
     """
+    cat_nueva = categoria_servicio(servicio) if servicio else None
     hd = horario_dia(fecha)
     if hd is None:
         return []  # domingo / cerrado
@@ -346,6 +382,8 @@ def slots_libres(
 
     ocupadas: list[tuple[time, time]] = []
     for c in citas_del_dia(fecha):
+        if not _chocan(cat_nueva, c.get("categoria")):
+            continue  # cita de otro servicio: se puede empalmar
         try:
             hi = datetime.strptime(c["inicio"], "%H:%M").time()
             hf = datetime.strptime(c["fin"], "%H:%M").time()
@@ -509,8 +547,10 @@ def crear_cita(
     # ── Anti-doble-agenda (candado del lado del servidor) ────────────────
     # Se revisa el traslape contra TODOS los calendarios de servicio:
     #   • Traslape de ESTA MISMA clienta → ya tenía cita: NO duplicamos (idempotente).
-    #   • Traslape de OTRA clienta → el horario está ocupado: se rechaza.
+    #   • Traslape de OTRA clienta del MISMO servicio (o de servicio desconocido) → ocupado.
+    #   • Traslape de OTRA clienta de OTRO servicio → se empalma sin problema.
     existentes = list(_eventos_dia_todos(svc, inicio.date()))  # [(cal_id, evento), ...]
+    cat_nueva = categoria_servicio(servicio)
 
     for _cal, ev in existentes:
         if ev.get("status") == "cancelled":
@@ -536,6 +576,8 @@ def crear_cita(
                     "cuando": cuando_ev,
                     "link": ev.get("htmlLink", ""),
                 }
+            if not _chocan(cat_nueva, _categoria_evento(_cal, ev)):
+                continue  # otro servicio: se empalma
             logger.info(f"Horario ocupado, se rechaza: {inicio.isoformat()} (choca con {ev_ini.isoformat()})")
             return {
                 "ok": False,

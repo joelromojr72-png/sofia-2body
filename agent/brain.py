@@ -67,7 +67,9 @@ HERRAMIENTAS = [
             "Devuelve los HORARIOS LIBRES reales de un día (ya descontando las citas "
             "ocupadas y el horario del spa). Úsala SIEMPRE antes de proponerle u ofrecerle "
             "cualquier hora a la clienta: nunca ofrezcas una hora sin haberla consultado aquí. "
-            "Ofrécele solo horarios que esta herramienta marque libres."
+            "Ofrécele solo horarios que esta herramienta marque libres. Pásale SIEMPRE el "
+            "servicio: las citas de OTRO servicio a la misma hora no estorban (cada servicio "
+            "tiene su cabina), así salen más horarios."
         ),
         "input_schema": {
             "type": "object",
@@ -75,6 +77,11 @@ HERRAMIENTAS = [
                 "fecha": {
                     "type": "string",
                     "description": "Dia a consultar en formato YYYY-MM-DD.",
+                },
+                "servicio": {
+                    "type": "string",
+                    "description": "Servicio que quiere la clienta (p. ej. 'facial', 'corporal', "
+                    "'depilación', 'masaje', 'EMSculpt'). Si aún no lo sabes, déjalo vacío.",
                 },
                 "duracion_min": {
                     "type": "integer",
@@ -221,9 +228,12 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "gustaría (si busca figura/moldear → sesión corporal; si busca piel/rostro → facial). "
             "Si no lo dijo, recomiéndele con calidez la que mejor le acomoda.\n"
             "2) ANTES de proponer u ofrecer CUALQUIER hora, usa SIEMPRE "
-            "`consultar_disponibilidad` de ese día y ofrécele 1-2 horarios ÚNICAMENTE de los que "
-            "la herramienta marque libres. NUNCA ofrezcas, confirmes ni des por buena una hora sin "
-            "haberla verificado ahí: así no se empalman las citas.\n"
+            "`consultar_disponibilidad` de ese día (con el 'servicio' que quiere, si ya lo sabes) y "
+            "ofrécele 1-2 horarios ÚNICAMENTE de los que la herramienta marque libres. NUNCA "
+            "ofrezcas, confirmes ni des por buena una hora sin haberla verificado ahí. Citas de "
+            "servicios DISTINTOS sí pueden coincidir a la misma hora (cada servicio tiene su "
+            "cabina); solo choca con citas del MISMO servicio. Si el horario que pide está lleno "
+            "para ese servicio, ofrécele otro horario o, si le interesa, otro servicio en esa hora.\n"
             "3) Cuando ella acepte una hora concreta (de las libres), llama `agendar_cita` (en "
             "'servicio' pon lo que va a vivir: p. ej. 'Sesión corporal sin costo', 'Sesión facial "
             "sin costo' o el tratamiento/paquete que pidió).\n"
@@ -285,7 +295,9 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
             if hd is None:
                 return f"El {fecha.isoformat()} es domingo: el spa está cerrado. Ofrece otro día."
             dur = int(args.get("duracion_min") or 60)
-            libres = await asyncio.to_thread(calendar_tool.slots_libres, fecha, dur)
+            libres = await asyncio.to_thread(
+                calendar_tool.slots_libres, fecha, dur, 60, 8, (args.get("servicio") or "").strip()
+            )
             ap, ci = hd
             horario = f"Horario ese día: {ap.strftime('%H:%M')}-{ci.strftime('%H:%M')}. "
             if not libres:
