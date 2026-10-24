@@ -294,6 +294,8 @@ def _servicio_de(cita: dict) -> str:
                               ("DEPIL", "sesión de depilación"), ("MASAJE", "masaje")):
         if palabra in t:
             return servicio
+    if cita.get("categoria"):  # p. ej. cita del calendario principal pintada del color del servicio
+        return _SERVICIO_POR_CALENDARIO.get(cita["categoria"], "cita")
     return _SERVICIO_POR_CALENDARIO.get(cita["calendario"], "cita")
 
 

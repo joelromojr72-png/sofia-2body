@@ -158,15 +158,32 @@ def categoria_servicio(texto: str) -> str | None:
     return None
 
 
+# Color de la CITA (colorId de Google Calendar) → servicio, igual que los colores de los
+# calendarios de cada servicio: masajes amarillo, faciales morado, depilación verde,
+# corporales azul. Sirve para citas del calendario principal que el equipo pinta a mano.
+_SERVICIO_POR_COLOR = {
+    "5": "masajes",      # Plátano (amarillo)
+    "3": "faciales",     # Uva (morado)
+    "10": "depilacion",  # Albahaca (verde)
+    "2": "depilacion",   # Salvia (verde claro)
+    "1": "corporales",   # Lavanda (azul claro)
+    "9": "corporales",   # Arándano (azul)
+}
+
+
 def _categoria_evento(cal_id: str, ev: dict) -> str | None:
-    """Categoría de una cita ya agendada: por su calendario, o por el título/servicio si es de venta o del principal."""
+    """
+    Categoría de una cita ya agendada: por su calendario de servicio; si es de venta o del
+    principal, por el título/'Servicio:' y, si no lo dice, por el COLOR de la cita.
+    """
     clave = next((c for c, cid, _ in _SERVICE_CALENDARS if cid == cal_id), None)
     if clave in _CATEGORIAS:
         return clave
     import re as _re
 
     m = _re.search(r"Servicio:\s*(.+)", ev.get("description", "") or "")
-    return categoria_servicio((ev.get("summary", "") or "") + " " + (m.group(1) if m else ""))
+    por_texto = categoria_servicio((ev.get("summary", "") or "") + " " + (m.group(1) if m else ""))
+    return por_texto or _SERVICIO_POR_COLOR.get(str(ev.get("colorId") or ""))
 
 
 def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:
@@ -479,6 +496,7 @@ def eventos_con_hora(fecha: date) -> list[dict]:
             {
                 "evento_id": _componer_evento_id(cal_id, ev.get("id", "")),
                 "calendario": clave_por_id.get(cal_id, "principal"),
+                "categoria": _categoria_evento(cal_id, ev),
                 "titulo": ev.get("summary", "") or "",
                 "descripcion": ev.get("description", "") or "",
                 "inicio": di,
