@@ -37,6 +37,7 @@ import binascii
 import json
 import logging
 import os
+import re
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -171,10 +172,18 @@ _SERVICIO_POR_COLOR = {
 }
 
 
-def _categoria_evento(cal_id: str, ev: dict) -> str | None:
+# El calendario principal (2Body Pachuca) está pintado del MISMO azul que "corporales" y el
+# equipo lo usa para las clientas de corporal: lo que se apunta ahí sin decir el servicio
+# (ni color propio) cuenta como corporal. Las juntas que crea alguien de fuera no.
+_PRINCIPAL_POR_DEFECTO = os.getenv("CATEGORIA_CALENDARIO_PRINCIPAL", "corporales").strip() or None
+
+
+def _categoria_evento(cal_id: str, ev: dict, explicita: bool = False) -> str | None:
     """
     Categoría de una cita ya agendada: por su calendario de servicio; si es de venta o del
-    principal, por el título/'Servicio:' y, si no lo dice, por el COLOR de la cita.
+    principal, por el título/'Servicio:' y, si no lo dice, por el COLOR de la cita. Si es del
+    principal sin nada de eso, corporal (ver arriba) — salvo con explicita=True (para el
+    texto del recordatorio, donde solo se usa lo que está escrito o pintado).
     """
     clave = next((c for c, cid, _ in _SERVICE_CALENDARS if cid == cal_id), None)
     if clave in _CATEGORIAS:
@@ -183,12 +192,80 @@ def _categoria_evento(cal_id: str, ev: dict) -> str | None:
 
     m = _re.search(r"Servicio:\s*(.+)", ev.get("description", "") or "")
     por_texto = categoria_servicio((ev.get("summary", "") or "") + " " + (m.group(1) if m else ""))
-    return por_texto or _SERVICIO_POR_COLOR.get(str(ev.get("colorId") or ""))
+    cat = por_texto or _SERVICIO_POR_COLOR.get(str(ev.get("colorId") or ""))
+    if cat or explicita or cal_id != CALENDAR_ID:
+        return cat
+    creador = ((ev.get("creator") or {}).get("email") or CALENDAR_ID).lower()
+    return _PRINCIPAL_POR_DEFECTO if creador == CALENDAR_ID.lower() else None
 
 
 def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:
     """Dos citas traslapadas chocan si son del mismo servicio o si alguna es de servicio desconocido."""
     return cat_nueva is None or cat_existente is None or cat_nueva == cat_existente
+
+
+# ── Una sola sesión sin costo por clienta ────────────────────────────────────
+# Regla de 2Body: a cada persona se le regala UNA sola sesión sin costo (facial O corporal,
+# la que sea). Antes de agendar una gratis se busca si ya tuvo o ya tiene apartada otra.
+_ES_GRATIS = re.compile(
+    r"sin\s+costo|gratis|cortes[ií]a|exp\.?\s*[uú]nica|experiencia|valoraci", re.I
+)
+_NO_NOMBRE_GRATIS = {"CITA", "POR", "CONFIRMAR", "SESION", "SIN", "COSTO", "EXP", "UNICA",
+                     "EXPERIENCIA", "VALORACION", "FACIAL", "CORPORAL", "DE", "LA", "DEL",
+                     "LOS", "LAS", "Y", "MA"}
+
+
+def _tokens(texto: str) -> set[str]:
+    import unicodedata
+
+    t = unicodedata.normalize("NFD", texto or "")
+    t = "".join(c for c in t if unicodedata.category(c) != "Mn").upper()
+    return {w for w in re.sub(r"[^A-Z ]", " ", t).split() if len(w) > 2 and w not in _NO_NOMBRE_GRATIS}
+
+
+def es_sesion_gratis(servicio: str) -> bool:
+    return bool(_ES_GRATIS.search(servicio or ""))
+
+
+def sesion_gratis_previa(telefono: str, nombre: str = "", ignorar_dia: date | None = None,
+                         dias_atras: int = 365, dias_adelante: int = 120) -> dict | None:
+    """
+    ¿Esta clienta ya tuvo (o ya tiene apartada) su sesión sin costo? Busca en TODOS los
+    calendarios citas gratis/Exp. Única/valoración con su teléfono, o con su nombre y
+    apellido en el título (citas que apuntó el equipo). Devuelve {"cuando","titulo","futura"}
+    o None. `ignorar_dia`: no cuenta las citas de Sofía de ese día de esta clienta (reagenda).
+    """
+    svc = _obtener_servicio()
+    if not svc:
+        return None
+    tel10 = "".join(c for c in (telefono or "") if c.isdigit())[-10:]
+    toks_nombre = _tokens(nombre)
+    ahora = datetime.now(TZ)
+    ini, fin = ahora - timedelta(days=dias_atras), ahora + timedelta(days=dias_adelante)
+    for cal_id in _calendarios_disponibilidad():
+        for ev in _listar_eventos(svc, cal_id, ini.isoformat(), fin.isoformat()):
+            if ev.get("status") == "cancelled":
+                continue
+            titulo, desc = ev.get("summary", "") or "", ev.get("description", "") or ""
+            if "cancel" in titulo.lower() or not _ES_GRATIS.search(titulo + " " + desc):
+                continue
+            s = (ev.get("start") or {}).get("dateTime")
+            if not s:
+                continue
+            try:
+                di = datetime.fromisoformat(s).astimezone(TZ)
+            except ValueError:
+                continue
+            digitos = "".join(c for c in titulo + " " + desc if c.isdigit())
+            por_tel = len(tel10) == 10 and tel10 in digitos
+            por_nombre = len(toks_nombre) >= 2 and toks_nombre <= _tokens(titulo)
+            if not (por_tel or por_nombre):
+                continue
+            if ignorar_dia and di.date() == ignorar_dia and por_tel and "Sofía" in desc:
+                continue  # su propia cita de ese día: es una reagenda, no otra gratis
+            return {"cuando": f"{_DIAS[di.weekday()]} {di.day}/{di.month} a las {di.strftime('%H:%M')}",
+                    "titulo": titulo, "futura": di > ahora}
+    return None
 
 
 def _calendarios_disponibilidad() -> list[str]:
@@ -496,7 +573,7 @@ def eventos_con_hora(fecha: date) -> list[dict]:
             {
                 "evento_id": _componer_evento_id(cal_id, ev.get("id", "")),
                 "calendario": clave_por_id.get(cal_id, "principal"),
-                "categoria": _categoria_evento(cal_id, ev),
+                "categoria": _categoria_evento(cal_id, ev, explicita=True),
                 "titulo": ev.get("summary", "") or "",
                 "descripcion": ev.get("description", "") or "",
                 "inicio": di,
@@ -561,6 +638,26 @@ def crear_cita(
     tel = telefono if telefono.startswith("+") else f"+{telefono}"
     tel_digits = "".join(c for c in tel if c.isdigit())
     cal_destino = _calendario_para_servicio(servicio)
+
+    # ── Una sola sesión sin costo por clienta (facial O corporal) ────────
+    if es_sesion_gratis(servicio):
+        try:
+            previa = sesion_gratis_previa(tel_digits, nombre, ignorar_dia=inicio.date())
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"No se pudo revisar si ya tuvo sesión gratis: {e}")
+            previa = None
+        if previa:
+            logger.info(f"Sesión gratis rechazada: {tel} ya tiene/tuvo una ({previa['cuando']})")
+            if previa["futura"]:
+                return {"ok": False, "error": (
+                    f"Esta clienta YA tiene apartada su sesión sin costo ({previa['cuando']}). "
+                    "Solo se regala UNA por persona (facial o corporal). Si quiere cambiarla, "
+                    "cancela esa con cancelar_cita y agenda la nueva; si quiere otro servicio "
+                    "además, ese ya va con su precio.")}
+            return {"ok": False, "error": (
+                f"Esta clienta YA tuvo su sesión sin costo ({previa['cuando']}). Solo se regala "
+                "UNA por persona (facial o corporal). No la agendes gratis: ofrécele con calidez "
+                "el tratamiento o paquete con su precio.")}
 
     # ── Anti-doble-agenda (candado del lado del servidor) ────────────────
     # Se revisa el traslape contra TODOS los calendarios de servicio:
@@ -683,6 +780,8 @@ def crear_cita(
                 od = "".join(c for c in otro.get("description", "") if c.isdigit())
                 if tel_digits and tel_digits in od:
                     continue  # otra cita de la MISMA clienta, no un empalme con alguien más
+                if not _chocan(cat_nueva, _categoria_evento(_cal, otro)):
+                    continue  # otro servicio: se puede empalmar
                 if otro.get("created", "") < nuestro_created:
                     try:
                         svc.events().delete(calendarId=cal_destino, eventId=nuestro_id).execute()
