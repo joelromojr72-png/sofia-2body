@@ -364,6 +364,29 @@ async def cargar_directorio(request: Request, key: str = "", fuente: str = "aneg
     return {"ok": True, "guardados": n, "fuente": fuente}
 
 
+@app.post("/admin/enviar")
+async def enviar_manual(request: Request, key: str = "", tel: str = ""):
+    """
+    Manda un mensaje de texto (dentro de las 24 h de WhatsApp) por el número de Sofía y lo
+    guarda en el historial, para que Sofía tenga el contexto cuando la clienta conteste.
+    Cuerpo JSON: {"texto": "..."}. Protegido con clave.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    if proveedor is None:
+        raise HTTPException(status_code=503, detail="proveedor no configurado")
+    texto = ((await request.json()) or {}).get("texto", "").strip()
+    digitos = "".join(c for c in tel if c.isdigit())
+    if len(digitos) < 10 or not texto:
+        raise HTTPException(status_code=400, detail="falta tel o texto")
+    tel_wa = digitos if len(digitos) > 10 else "521" + digitos
+    ok = await proveedor.enviar_mensaje(tel_wa, texto)
+    if ok:
+        await guardar_mensaje(tel_wa, "assistant", texto)
+    return {"ok": bool(ok), "telefono": tel_wa}
+
+
 @app.post("/admin/nudge_equipo/rearmar")
 async def rearmar_nudge_equipo(key: str = ""):
     """

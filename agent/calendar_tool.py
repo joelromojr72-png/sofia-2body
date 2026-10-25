@@ -199,6 +199,10 @@ def _categoria_evento(cal_id: str, ev: dict, explicita: bool = False) -> str | N
     return _PRINCIPAL_POR_DEFECTO if creador == CALENDAR_ID.lower() else None
 
 
+# Máximo de citas a la MISMA hora en todo el spa (aunque sean de servicios distintos).
+MAX_CITAS_SIMULTANEAS = int(os.getenv("MAX_CITAS_SIMULTANEAS") or "2")
+
+
 def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:
     """Dos citas traslapadas chocan si son del mismo servicio o si alguna es de servicio desconocido."""
     return cat_nueva is None or cat_existente is None or cat_nueva == cat_existente
@@ -474,16 +478,17 @@ def slots_libres(
     apertura, cierre = hd
     dur = max(15, int(duracion_min or 60))
 
-    ocupadas: list[tuple[time, time]] = []
+    ocupadas: list[tuple[time, time]] = []   # chocan por mismo servicio
+    todas: list[tuple[time, time]] = []      # todas, para el tope de citas simultáneas
     for c in citas_del_dia(fecha):
-        if not _chocan(cat_nueva, c.get("categoria")):
-            continue  # cita de otro servicio: se puede empalmar
         try:
             hi = datetime.strptime(c["inicio"], "%H:%M").time()
             hf = datetime.strptime(c["fin"], "%H:%M").time()
         except (ValueError, KeyError):
             continue
-        ocupadas.append((hi, hf))
+        todas.append((hi, hf))
+        if _chocan(cat_nueva, c.get("categoria")):
+            ocupadas.append((hi, hf))
 
     ahora = datetime.now(TZ)
     t = datetime.combine(fecha, apertura, tzinfo=TZ)
@@ -497,7 +502,9 @@ def slots_libres(
     while t + d <= fin_dia:
         ini_t, fin_t = t.time(), (t + d).time()
         en_futuro = t >= ahora + timedelta(minutes=1)
-        choca = any(ini_t < of and fin_t > oi for (oi, of) in ocupadas)
+        choca = any(ini_t < of and fin_t > oi for (oi, of) in ocupadas) or (
+            sum(1 for (oi, of) in todas if ini_t < of and fin_t > oi) >= MAX_CITAS_SIMULTANEAS
+        )
         if en_futuro and not choca:
             libres.append(t.strftime("%H:%M"))
             if len(libres) >= max_slots:
@@ -666,6 +673,7 @@ def crear_cita(
     #   • Traslape de OTRA clienta de OTRO servicio → se empalma sin problema.
     existentes = list(_eventos_dia_todos(svc, inicio.date()))  # [(cal_id, evento), ...]
     cat_nueva = categoria_servicio(servicio)
+    simultaneas = 0  # citas de OTRAS clientas a esa hora (tope MAX_CITAS_SIMULTANEAS)
 
     for _cal, ev in existentes:
         if ev.get("status") == "cancelled":
@@ -690,6 +698,13 @@ def crear_cita(
                     "duplicada": True,
                     "cuando": cuando_ev,
                     "link": ev.get("htmlLink", ""),
+                }
+            simultaneas += 1
+            if simultaneas >= MAX_CITAS_SIMULTANEAS:
+                logger.info(f"Tope de {MAX_CITAS_SIMULTANEAS} citas simultáneas: se rechaza {inicio.isoformat()}")
+                return {
+                    "ok": False,
+                    "error": f"A esa hora ({inicio.strftime('%H:%M')}) ya hay {MAX_CITAS_SIMULTANEAS} citas; ofrece otra hora.",
                 }
             if not _chocan(cat_nueva, _categoria_evento(_cal, ev)):
                 continue  # otro servicio: se empalma
@@ -764,6 +779,7 @@ def crear_cita(
     try:
         nuestro_id = ev.get("id", "")
         nuestro_created = ev.get("created", "")
+        previas = 0  # citas de otras clientas a esa hora creadas ANTES que la nuestra
         for _cal, otro in _eventos_dia_todos(svc, inicio.date()):
             if otro.get("id") == nuestro_id or otro.get("status") == "cancelled":
                 continue
@@ -780,9 +796,11 @@ def crear_cita(
                 od = "".join(c for c in otro.get("description", "") if c.isdigit())
                 if tel_digits and tel_digits in od:
                     continue  # otra cita de la MISMA clienta, no un empalme con alguien más
-                if not _chocan(cat_nueva, _categoria_evento(_cal, otro)):
-                    continue  # otro servicio: se puede empalmar
-                if otro.get("created", "") < nuestro_created:
+                antes = otro.get("created", "") < nuestro_created
+                previas += 1 if antes else 0
+                if not _chocan(cat_nueva, _categoria_evento(_cal, otro)) and previas < MAX_CITAS_SIMULTANEAS:
+                    continue  # otro servicio y sin pasar el tope: se puede empalmar
+                if antes:
                     try:
                         svc.events().delete(calendarId=cal_destino, eventId=nuestro_id).execute()
                     except Exception:  # noqa: BLE001
