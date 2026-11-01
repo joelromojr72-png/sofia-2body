@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mantenimiento de Carros</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --texto: #1c1f24; --suave: #5f6670; --borde: #dde1e6;
+    --primario: #1f6feb; --rojo: #c62828; --rojo-bg: #fdecea; --ambar: #a15c00; --ambar-bg: #fff4e0;
+    --verde: #1b7f3b; --verde-bg: #e6f4ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121417; --card: #1c1f24; --texto: #e8eaed; --suave: #9aa1ab; --borde: #30353c;
+      --primario: #4c8dff; --rojo: #ff6b6b; --rojo-bg: #3a1d1d; --ambar: #ffb347; --ambar-bg: #3a2c14;
+      --verde: #5fd383; --verde-bg: #173222;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--texto); line-height: 1.4; }
+  header { background: var(--card); border-bottom: 1px solid var(--borde); padding: 12px 16px; display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 18px; margin: 0; flex: 1; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; }
+  button, .btn { font: inherit; border: 1px solid var(--borde); background: var(--card); color: var(--texto); border-radius: 8px; padding: 8px 12px; cursor: pointer; }
+  button.primario { background: var(--primario); border-color: var(--primario); color: #fff; }
+  button.peligro { color: var(--rojo); }
+  button.chico { padding: 4px 8px; font-size: 13px; }
+  input, select, textarea { font: inherit; width: 100%; padding: 8px 10px; border: 1px solid var(--borde); border-radius: 8px; background: var(--bg); color: var(--texto); }
+  label { display: block; font-size: 13px; color: var(--suave); margin: 10px 0 4px; }
+  .tarjeta { background: var(--card); border: 1px solid var(--borde); border-radius: 12px; padding: 14px; margin-bottom: 14px; }
+  .fila { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .fila > * { flex: 1 1 140px; }
+  .encabezado-carro { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+  .encabezado-carro h2 { margin: 0; font-size: 18px; }
+  .sub { color: var(--suave); font-size: 14px; }
+  .estado { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .vencido { background: var(--rojo-bg); color: var(--rojo); }
+  .pronto { background: var(--ambar-bg); color: var(--ambar); }
+  .ok { background: var(--verde-bg); color: var(--verde); }
+  .servicio { border-top: 1px solid var(--borde); padding: 10px 0; display: flex; gap: 10px; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+  .servicio .info { flex: 1 1 220px; }
+  .servicio .acciones { display: flex; gap: 6px; flex-wrap: wrap; }
+  .resumen { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
+  .resumen .tarjeta { margin: 0; text-align: center; }
+  .resumen b { display: block; font-size: 26px; }
+  .pendiente { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--borde); flex-wrap: wrap; }
+  .pendiente:first-of-type { border-top: 0; }
+  dialog { border: 1px solid var(--borde); border-radius: 12px; background: var(--card); color: var(--texto); width: min(520px, calc(100vw - 32px)); padding: 16px; }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h3 { margin: 0 0 6px; }
+  .botones { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+  details summary { cursor: pointer; color: var(--suave); font-size: 14px; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { text-align: left; padding: 6px 4px; border-top: 1px solid var(--borde); }
+  #aviso { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--texto); color: var(--bg); padding: 10px 16px; border-radius: 8px; display: none; z-index: 20; max-width: calc(100vw - 32px); }
+  .oculto { display: none !important; }
+  .vacio { text-align: center; color: var(--suave); padding: 30px 10px; }
+  @media (max-width: 520px) { .resumen b { font-size: 20px; } }
+</style>
+</head>
+<body>
+
+<!-- ── Pantalla de entrada ───────────────────────────────── -->
+<section id="login" class="oculto">
+  <main>
+    <div class="tarjeta" style="max-width:380px;margin:60px auto">
+      <h2 style="margin-top:0">Mantenimiento de Carros</h2>
+      <p class="sub">Escribe tu PIN para ver tus carros.</p>
+      <form id="form-login">
+        <input id="pin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN" required>
+        <div class="botones"><button class="primario" type="submit">Entrar</button></div>
+      </form>
+      <p id="error-login" class="sub" style="color:var(--rojo)"></p>
+    </div>
+  </main>
+</section>
+
+<!-- ── App ───────────────────────────────────────────────── -->
+<section id="app" class="oculto">
+  <header>
+    <h1>🚗 Mis carros</h1>
+    <button id="btn-ics" title="Descargar recordatorios para tu calendario">📅 Calendario</button>
+    <button id="btn-nuevo-carro" class="primario">+ Carro</button>
+  </header>
+  <main>
+    <div class="resumen">
+      <div class="tarjeta"><b id="n-vencidos" style="color:var(--rojo)">0</b><span class="sub">Vencidos</span></div>
+      <div class="tarjeta"><b id="n-pronto" style="color:var(--ambar)">0</b><span class="sub">Próximos 30 días</span></div>
+      <div class="tarjeta"><b id="n-carros">0</b><span class="sub">Carros</span></div>
+    </div>
+
+    <div class="tarjeta" id="caja-pendientes">
+      <h3 style="margin:0 0 6px">Lo que toca pronto</h3>
+      <div id="pendientes"></div>
+    </div>
+
+    <div id="carros"></div>
+    <p class="sub" style="text-align:center"><a href="#" id="salir" style="color:var(--suave)">Cerrar sesión</a></p>
+  </main>
+</section>
+
+<!-- ── Diálogo: carro ────────────────────────────────────── -->
+<dialog id="dlg-carro">
+  <form method="dialog" id="form-carro">
+    <h3 id="titulo-carro">Nuevo carro</h3>
+    <label>Nombre (cómo le dices)</label>
+    <input name="nombre" required placeholder="Ej: La camioneta blanca">
+    <div class="fila">
+      <div><label>Marca</label><input name="marca" placeholder="Nissan"></div>
+      <div><label>Modelo</label><input name="modelo" placeholder="Versa"></div>
+    </div>
+    <div class="fila">
+      <div><label>Año</label><input name="anio" type="number" min="1950" max="2100"></div>
+      <div><label>Placa</label><input name="placa" placeholder="ABC-123-D"></div>
+    </div>
+    <div class="fila">
+      <div><label>Kilometraje actual</label><input name="km" type="number" min="0" required></div>
+      <div><label>Color engomado (verificación)</label>
+        <select name="engomado">
+          <option value="">Calcular por placa</option>
+          <option value="amarillo">Amarillo (5 y 6)</option>
+          <option value="rosa">Rosa (7 y 8)</option>
+          <option value="rojo">Rojo (3 y 4)</option>
+          <option value="verde">Verde (1 y 2)</option>
+          <option value="azul">Azul (9 y 0)</option>
+        </select>
+      </div>
+    </div>
+    <label><input type="checkbox" name="serviciosBase" checked style="width:auto"> Agregar servicios comunes (aceite, verificación, seguro, llantas…)</label>
+    <div class="botones">
+      <button value="cancelar" formnovalidate>Cancelar</button>
+      <button class="primario" value="guardar">Guardar</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ── Diálogo: servicio ─────────────────────────────────── -->
+<dialog id="dlg-servicio">
+  <form method="dialog" id="form-servicio">
+    <h3 id="titulo-servicio">Nuevo servicio</h3>
+    <label>Servicio</label>
+    <input name="tipo" required list="tipos" placeholder="Ej: Cambio de aceite">
+    <datalist id="tipos"></datalist>
+    <div class="fila">
+      <div><label>Cada cuántos km</label><input name="cadaKm" type="number" min="0" placeholder="Vacío = no aplica"></div>
+      <div><label>Cada cuántos meses</label><input name="cadaMeses" type="number" min="0" placeholder="Vacío = no aplica"></div>
+    </div>
+    <div class="fila">
+      <div><label>Última vez (fecha)</label><input name="ultimaFecha" type="date"></div>
+      <div><label>Última vez (km)</label><input name="ultimoKm" type="number" min="0"></div>
+    </div>
+    <label>O fecha límite fija (seguro, tenencia, licencia…)</label>
+    <input name="fechaLimite" type="date">
+    <label>Notas</label>
+    <input name="notas" placeholder="Ej: aceite sintético 5W-30">
+    <div class="botones">
+      <button value="cancelar" formnovalidate>Cancelar</button>
+      <button class="primario" value="guardar">Guardar</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ── Diálogo: marcar como hecho ────────────────────────── -->
+<dialog id="dlg-hecho">
+  <form method="dialog" id="form-hecho">
+    <h3 id="titulo-hecho">Registrar servicio</h3>
+    <div class="fila">
+      <div><label>Fecha</label><input name="fecha" type="date" required></div>
+      <div><label>Kilometraje</label><input name="km" type="number" min="0"></div>
+    </div>
+    <div class="fila">
+      <div><label>Costo ($)</label><input name="costo" type="number" min="0" step="0.01"></div>
+      <div><label>Taller / lugar</label><input name="lugar"></div>
+    </div>
+    <div id="caja-nueva-fecha">
+      <label>Nueva fecha límite (si aplica)</label>
+      <input name="nuevaFechaLimite" type="date">
+    </div>
+    <label>Notas</label>
+    <input name="notas">
+    <div class="botones">
+      <button value="cancelar" formnovalidate>Cancelar</button>
+      <button class="primario" value="guardar">Registrar</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ── Diálogo: kilometraje ──────────────────────────────── -->
+<dialog id="dlg-km">
+  <form method="dialog" id="form-km">
+    <h3>Actualizar kilometraje</h3>
+    <label>Kilometraje actual</label>
+    <input name="km" type="number" min="0" required>
+    <div class="botones">
+      <button value="cancelar" formnovalidate>Cancelar</button>
+      <button class="primario" value="guardar">Guardar</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="aviso"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// Estado y comunicación con el Worker (que guarda en R2)
+// ═══════════════════════════════════════════════════════════
+let datos = { version: 1, carros: [] };
+let etag = null;
+let pin = "";
+try { pin = localStorage.getItem("pin") || ""; } catch {}
+
+const DIAS_AVISO = 30;     // "pronto" = faltan 30 días o menos
+const KM_AVISO = 1000;     // "pronto" = faltan 1000 km o menos
+
+const SERVICIOS_BASE = [
+  { tipo: "Cambio de aceite y filtro", cadaKm: 10000, cadaMeses: 6 },
+  { tipo: "Verificación vehicular", cadaMeses: 6, verificacion: true },
+  { tipo: "Seguro del auto", cadaMeses: 12 },
+  { tipo: "Tenencia / refrendo", cadaMeses: 12 },
+  { tipo: "Rotación y revisión de llantas", cadaKm: 10000, cadaMeses: 6 },
+  { tipo: "Frenos (balatas)", cadaKm: 30000, cadaMeses: 24 },
+  { tipo: "Filtro de aire", cadaKm: 20000, cadaMeses: 12 },
+];
+const SUGERENCIAS = [...SERVICIOS_BASE.map(s => s.tipo), "Afinación", "Batería", "Anticongelante", "Alineación y balanceo",
+  "Líquido de frenos", "Banda de distribución", "Amortiguadores", "Licencia de conducir", "Tarjeta de circulación"];
+
+async function api(metodo, cuerpo) {
+  const headers = { "X-Pin": pin };
+  if (cuerpo) { headers["Content-Type"] = "application/json"; if (etag) headers["If-Match"] = etag; }
+  const r = await fetch("/api/datos", { method: metodo, headers, body: cuerpo ? JSON.stringify(cuerpo) : undefined });
+  if (r.status === 401) { cerrarSesion("PIN incorrecto"); throw new Error("PIN incorrecto"); }
+  if (r.status === 409) {
+    aviso("Se hicieron cambios desde otro dispositivo. Recargando…");
+    await cargar();
+    throw new Error("conflicto");
+  }
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Error " + r.status); }
+  etag = r.headers.get("ETag") || etag;
+  return r.json();
+}
+
+async function cargar() {
+  datos = await api("GET");
+  if (!Array.isArray(datos.carros)) datos.carros = [];
+  pintar();
+}
+
+async function guardar() {
+  try {
+    await api("PUT", datos);
+    pintar();
+  } catch (e) {
+    if (e.message !== "conflicto" && e.message !== "PIN incorrecto") aviso("No se pudo guardar: " + e.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Cálculo de cuándo toca cada servicio
+// ═══════════════════════════════════════════════════════════
+const hoyISO = () => new Date().toISOString().slice(0, 10);
+const id = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+function sumarMeses(fechaISO, meses) {
+  const [a, m, d] = fechaISO.split("-").map(Number);
+  const f = new Date(Date.UTC(a, m - 1 + meses, 1));
+  const ultimoDia = new Date(Date.UTC(f.getUTCFullYear(), f.getUTCMonth() + 1, 0)).getUTCDate();
+  f.setUTCDate(Math.min(d, ultimoDia));
+  return f.toISOString().slice(0, 10);
+}
+function diasHasta(fechaISO) {
+  const hoy = new Date(hoyISO() + "T00:00:00Z");
+  return Math.round((new Date(fechaISO + "T00:00:00Z") - hoy) / 86400000);
+}
+function fechaBonita(iso) {
+  if (!iso) return "";
+  const [a, m, d] = iso.split("-").map(Number);
+  return new Date(Date.UTC(a, m - 1, d)).toLocaleDateString("es-MX", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
+const kmBonito = n => Number(n).toLocaleString("es-MX") + " km";
+
+// Calendario de verificación CDMX / Edomex según el último dígito de la placa.
+// Cada color verifica 2 veces al año, en estos bimestres (mes de inicio, 1 = enero).
+const ENGOMADOS = {
+  amarillo: { digitos: "5 y 6", meses: [1, 7] },
+  rosa:     { digitos: "7 y 8", meses: [2, 8] },
+  rojo:     { digitos: "3 y 4", meses: [3, 9] },
+  verde:    { digitos: "1 y 2", meses: [4, 10] },
+  azul:     { digitos: "9 y 0", meses: [5, 11] },
+};
+function engomadoDe(carro) {
+  if (carro.engomado) return carro.engomado;
+  const digitos = (carro.placa || "").replace(/\D/g, "");
+  if (!digitos) return null;
+  const d = Number(digitos.at(-1));
+  return { 5: "amarillo", 6: "amarillo", 7: "rosa", 8: "rosa", 3: "rojo", 4: "rojo", 1: "verde", 2: "verde", 9: "azul", 0: "azul" }[d];
+}
+// Fin del próximo periodo de verificación que aún no se ha cumplido
+function limiteVerificacion(carro, servicio) {
+  const color = engomadoDe(carro);
+  if (!color) return null;
+  const ultima = servicio.ultimaFecha || "1900-01-01";
+  const anioHoy = new Date().getUTCFullYear();
+  for (let a = anioHoy - 1; a <= anioHoy + 1; a++) {
+    for (const mesInicio of ENGOMADOS[color].meses) {
+      const inicio = `${a}-${String(mesInicio).padStart(2, "0")}-01`;
+      const fin = new Date(Date.UTC(a, mesInicio + 1, 0)).toISOString().slice(0, 10); // último día del bimestre
+      // Si ya verificó dentro o después de que abrió este periodo, ese periodo ya está cumplido
+      if (ultima >= inicio) continue;
+      // Sin fecha registrada no sabemos si verificó antes: arrancamos desde el periodo actual
+      if (!servicio.ultimaFecha && diasHasta(fin) < 0) continue;
+      return { inicio, fin, color };
+    }
+  }
+  return null;
+}
+
+function calcular(carro, s) {
+  const r = { proximaFecha: null, proximoKm: null, estado: "ok", texto: [], periodo: null };
+
+  if (s.verificacion) {
+    const p = limiteVerificacion(carro, s);
+    if (p) { r.proximaFecha = p.fin; r.periodo = p; }
+  } else if (s.fechaLimite) {
+    r.proximaFecha = s.fechaLimite;
+  } else if (s.cadaMeses && s.ultimaFecha) {
+    r.proximaFecha = sumarMeses(s.ultimaFecha, Number(s.cadaMeses));
+  }
+  if (s.cadaKm && s.ultimoKm !== undefined && s.ultimoKm !== null && s.ultimoKm !== "") {
+    r.proximoKm = Number(s.ultimoKm) + Number(s.cadaKm);
+  }
+
+  const niveles = [];
+  if (r.proximaFecha) {
+    const dias = diasHasta(r.proximaFecha);
+    if (r.periodo) {
+      const abierto = diasHasta(r.periodo.inicio) <= 0;
+      r.texto.push(abierto
+        ? `periodo abierto: hasta ${fechaBonita(r.periodo.fin)}`
+        : `del ${fechaBonita(r.periodo.inicio)} al ${fechaBonita(r.periodo.fin)}`);
+    } else {
+      r.texto.push(dias < 0 ? `venció hace ${-dias} días (${fechaBonita(r.proximaFecha)})`
+        : dias === 0 ? "vence hoy" : `en ${dias} días (${fechaBonita(r.proximaFecha)})`);
+    }
+    niveles.push(dias < 0 ? 2 : dias <= DIAS_AVISO || (r.periodo && diasHasta(r.periodo.inicio) <= 0) ? 1 : 0);
+  }
+  if (r.proximoKm !== null) {
+    const faltan = r.proximoKm - Number(carro.km || 0);
+    r.texto.push(faltan <= 0 ? `se pasó por ${kmBonito(-faltan)}` : `faltan ${kmBonito(faltan)} (a los ${kmBonito(r.proximoKm)})`);
+    niveles.push(faltan <= 0 ? 2 : faltan <= KM_AVISO ? 1 : 0);
+  }
+  if (!niveles.length) {
+    r.estado = "sin-datos";
+    r.texto.push(s.verificacion ? "agrega la placa o el color de engomado" : "registra cuándo se hizo por última vez");
+  } else {
+    const max = Math.max(...niveles);
+    r.estado = max === 2 ? "vencido" : max === 1 ? "pronto" : "ok";
+  }
+  return r;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Pintar la pantalla
+// ═══════════════════════════════════════════════════════════
+const $ = s => document.querySelector(s);
+const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ETIQUETA = { vencido: "Vencido", pronto: "Pronto", ok: "Al día", "sin-datos": "Sin datos" };
+
+function pintar() {
+  let vencidos = 0, pronto = 0;
+  const pendientes = [];
+
+  const html = datos.carros.map(carro => {
+    const servicios = (carro.servicios || []).map(s => {
+      const c = calcular(carro, s);
+      if (c.estado === "vencido") vencidos++;
+      if (c.estado === "pronto") pronto++;
+      if (c.estado === "vencido" || c.estado === "pronto") pendientes.push({ carro, s, c });
+      const clase = c.estado === "sin-datos" ? "pronto" : c.estado;
+      return `<div class="servicio">
+        <div class="info">
+          <div><b>${esc(s.tipo)}</b> <span class="estado ${clase}">${ETIQUETA[c.estado]}</span></div>
+          <div class="sub">${esc(c.texto.join(" · "))}</div>
+          ${s.notas ? `<div class="sub">📝 ${esc(s.notas)}</div>` : ""}
+        </div>
+        <div class="acciones">
+          <button class="chico primario" data-accion="hecho" data-carro="${carro.id}" data-servicio="${s.id}">✓ Hecho</button>
+          <button class="chico" data-accion="editar-servicio" data-carro="${carro.id}" data-servicio="${s.id}">Editar</button>
+        </div>
+      </div>`;
+    }).join("");
+
+    const historial = (carro.historial || []).slice().sort((a, b) => b.fecha.localeCompare(a.fecha));
+    const total = historial.reduce((t, h) => t + (Number(h.costo) || 0), 0);
+    const color = engomadoDe(carro);
+
+    return `<div class="tarjeta">
+      <div class="encabezado-carro">
+        <div>
+          <h2>${esc(carro.nombre)}</h2>
+          <div class="sub">${esc([carro.marca, carro.modelo, carro.anio].filter(Boolean).join(" "))}${carro.placa ? " · " + esc(carro.placa) : ""}${color ? ` · engomado ${color}` : ""}</div>
+          <div class="sub">🛣️ ${kmBonito(carro.km || 0)}</div>
+        </div>
+        <div class="fila" style="flex:0 0 auto">
+          <button class="chico" data-accion="km" data-carro="${carro.id}">Actualizar km</button>
+          <button class="chico" data-accion="nuevo-servicio" data-carro="${carro.id}">+ Servicio</button>
+          <button class="chico" data-accion="editar-carro" data-carro="${carro.id}">Editar</button>
+        </div>
+      </div>
+      ${servicios || `<p class="sub">Sin servicios todavía. Agrega uno con "+ Servicio".</p>`}
+      ${historial.length ? `<details><summary>Historial (${historial.length}) · gastado $${total.toLocaleString("es-MX")}</summary>
+        <table><tr><th>Fecha</th><th>Servicio</th><th>Km</th><th>Costo</th><th></th></tr>
+        ${historial.map(h => `<tr><td>${fechaBonita(h.fecha)}</td><td>${esc(h.tipo)}${h.lugar ? `<div class="sub">${esc(h.lugar)}</div>` : ""}${h.notas ? `<div class="sub">${esc(h.notas)}</div>` : ""}</td>
+          <td>${h.km ? Number(h.km).toLocaleString("es-MX") : ""}</td><td>${h.costo ? "$" + Number(h.costo).toLocaleString("es-MX") : ""}</td>
+          <td><button class="chico peligro" data-accion="borrar-historial" data-carro="${carro.id}" data-historial="${h.id}" title="Borrar">✕</button></td></tr>`).join("")}
+        </table></details>` : ""}
+    </div>`;
+  }).join("");
+
+  $("#carros").innerHTML = html || `<div class="tarjeta vacio">Todavía no tienes carros.<br><br><button class="primario" onclick="abrirCarro()">+ Agregar mi primer carro</button></div>`;
+
+  const orden = { vencido: 0, pronto: 1 };
+  pendientes.sort((a, b) => orden[a.c.estado] - orden[b.c.estado] || (a.c.proximaFecha || "9").localeCompare(b.c.proximaFecha || "9"));
+  $("#pendientes").innerHTML = pendientes.length
+    ? pendientes.map(p => `<div class="pendiente"><div><b>${esc(p.s.tipo)}</b> — ${esc(p.carro.nombre)}<div class="sub">${esc(p.c.texto.join(" · "))}</div></div>
+        <span class="estado ${p.c.estado}">${ETIQUETA[p.c.estado]}</span></div>`).join("")
+    : `<p class="sub" style="margin:0">Todo al día 👍</p>`;
+
+  $("#n-vencidos").textContent = vencidos;
+  $("#n-pronto").textContent = pronto;
+  $("#n-carros").textContent = datos.carros.length;
+}
+
+// ═══════════════════════════════════════════════════════════
+// Diálogos y acciones
+// ═══════════════════════════════════════════════════════════
+let editando = {};
+const buscarCarro = cid => datos.carros.find(c => c.id === cid);
+
+function llenar(form, valores) {
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    if (el.type === "checkbox") continue;
+    el.value = valores[el.name] ?? "";
+  }
+}
+function leer(form) {
+  const o = {};
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    o[el.name] = el.type === "checkbox" ? el.checked : el.value.trim();
+  }
+  return o;
+}
+const num = v => (v === "" || v === undefined ? null : Number(v));
+
+function abrirCarro(cid) {
+  const form = $("#form-carro");
+  const carro = cid ? buscarCarro(cid) : null;
+  editando = { carro: cid };
+  form.reset();
+  llenar(form, carro || {});
+  $("#titulo-carro").textContent = carro ? "Editar carro" : "Nuevo carro";
+  form.serviciosBase.closest("label").classList.toggle("oculto", !!carro);
+  $("#dlg-carro").dataset.borrar = carro ? "1" : "";
+  pintarBotonBorrar("#form-carro", carro ? () => borrarCarro(cid) : null);
+  $("#dlg-carro").showModal();
+}
+
+function pintarBotonBorrar(sel, fn) {
+  const botones = $(sel + " .botones");
+  botones.querySelector(".borrar")?.remove();
+  if (!fn) return;
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "peligro borrar"; b.textContent = "Borrar"; b.style.marginRight = "auto";
+  b.onclick = fn;
+  botones.prepend(b);
+}
+
+function borrarCarro(cid) {
+  const c = buscarCarro(cid);
+  if (!confirm(`¿Borrar "${c.nombre}" con todos sus servicios e historial?`)) return;
+  datos.carros = datos.carros.filter(x => x.id !== cid);
+  $("#dlg-carro").close();
+  guardar();
+}
+
+$("#form-carro").addEventListener("submit", e => {
+  if (e.submitter?.value !== "guardar") return;
+  const v = leer(e.target);
+  const campos = { nombre: v.nombre, marca: v.marca, modelo: v.modelo, anio: num(v.anio), placa: v.placa.toUpperCase(), km: num(v.km) || 0, engomado: v.engomado };
+  if (editando.carro) {
+    Object.assign(buscarCarro(editando.carro), campos);
+  } else {
+    const nuevo = { id: id(), ...campos, servicios: [], historial: [] };
+    if (v.serviciosBase) nuevo.servicios = SERVICIOS_BASE.map(s => ({ id: id(), ...s }));
+    datos.carros.push(nuevo);
+  }
+  guardar();
+});
+
+function abrirServicio(cid, sid) {
+  const form = $("#form-servicio");
+  const carro = buscarCarro(cid);
+  const s = sid ? carro.servicios.find(x => x.id === sid) : null;
+  editando = { carro: cid, servicio: sid };
+  form.reset();
+  llenar(form, s || {});
+  $("#titulo-servicio").textContent = (s ? "Editar: " : "Nuevo servicio — ") + carro.nombre;
+  pintarBotonBorrar("#form-servicio", s ? () => {
+    if (!confirm(`¿Borrar el servicio "${s.tipo}"?`)) return;
+    carro.servicios = carro.servicios.filter(x => x.id !== sid);
+    $("#dlg-servicio").close(); guardar();
+  } : null);
+  $("#dlg-servicio").showModal();
+}
+
+$("#form-servicio").addEventListener("submit", e => {
+  if (e.submitter?.value !== "guardar") return;
+  const v = leer(e.target);
+  const carro = buscarCarro(editando.carro);
+  const campos = { tipo: v.tipo, cadaKm: num(v.cadaKm), cadaMeses: num(v.cadaMeses), ultimaFecha: v.ultimaFecha || null,
+    ultimoKm: num(v.ultimoKm), fechaLimite: v.fechaLimite || null, notas: v.notas };
+  if (editando.servicio) {
+    Object.assign(carro.servicios.find(x => x.id === editando.servicio), campos);
+  } else {
+    carro.servicios.push({ id: id(), ...campos, verificacion: /verificaci/i.test(v.tipo) });
+  }
+  guardar();
+});
+
+function abrirHecho(cid, sid) {
+  const form = $("#form-hecho");
+  const carro = buscarCarro(cid);
+  const s = carro.servicios.find(x => x.id === sid);
+  editando = { carro: cid, servicio: sid };
+  form.reset();
+  form.fecha.value = hoyISO();
+  form.km.value = carro.km || "";
+  // Si tiene fecha límite fija (ej. seguro), proponer la del año siguiente
+  $("#caja-nueva-fecha").classList.toggle("oculto", !s.fechaLimite);
+  if (s.fechaLimite) form.nuevaFechaLimite.value = sumarMeses(s.fechaLimite, Number(s.cadaMeses) || 12);
+  $("#titulo-hecho").textContent = `${s.tipo} — ${carro.nombre}`;
+  $("#dlg-hecho").showModal();
+}
+
+$("#form-hecho").addEventListener("submit", e => {
+  if (e.submitter?.value !== "guardar") return;
+  const v = leer(e.target);
+  const carro = buscarCarro(editando.carro);
+  const s = carro.servicios.find(x => x.id === editando.servicio);
+  s.ultimaFecha = v.fecha;
+  if (v.km !== "") s.ultimoKm = Number(v.km);
+  if (s.fechaLimite) s.fechaLimite = v.nuevaFechaLimite || null;
+  if (v.km !== "" && Number(v.km) > Number(carro.km || 0)) carro.km = Number(v.km);
+  carro.historial = carro.historial || [];
+  carro.historial.push({ id: id(), servicioId: s.id, tipo: s.tipo, fecha: v.fecha, km: num(v.km), costo: num(v.costo), lugar: v.lugar, notas: v.notas });
+  guardar();
+  aviso("Registrado ✓");
+});
+
+$("#form-km").addEventListener("submit", e => {
+  if (e.submitter?.value !== "guardar") return;
+  buscarCarro(editando.carro).km = Number(leer(e.target).km);
+  guardar();
+});
+
+$("#carros").addEventListener("click", e => {
+  const b = e.target.closest("button[data-accion]");
+  if (!b) return;
+  const { accion, carro, servicio, historial } = b.dataset;
+  if (accion === "editar-carro") abrirCarro(carro);
+  if (accion === "nuevo-servicio") abrirServicio(carro);
+  if (accion === "editar-servicio") abrirServicio(carro, servicio);
+  if (accion === "hecho") abrirHecho(carro, servicio);
+  if (accion === "km") {
+    editando = { carro };
+    $("#form-km").km.value = buscarCarro(carro).km || "";
+    $("#dlg-km").showModal();
+  }
+  if (accion === "borrar-historial" && confirm("¿Borrar este registro del historial?")) {
+    const c = buscarCarro(carro);
+    c.historial = c.historial.filter(h => h.id !== historial);
+    guardar();
+  }
+});
+
+$("#btn-nuevo-carro").onclick = () => abrirCarro();
+
+// ═══════════════════════════════════════════════════════════
+// Recordatorios en el calendario del celular (.ics)
+// ═══════════════════════════════════════════════════════════
+$("#btn-ics").onclick = () => {
+  const lineas = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Mantenimiento de Carros//ES", "CALSCALE:GREGORIAN"];
+  let n = 0;
+  const limpiar = t => String(t).replace(/[\\;,]/g, m => "\\" + m).replace(/\n/g, "\\n");
+  for (const carro of datos.carros) {
+    for (const s of carro.servicios || []) {
+      const c = calcular(carro, s);
+      if (!c.proximaFecha) continue;
+      // El recordatorio cae al inicio del periodo de verificación, o el mismo día límite
+      const dia = (c.periodo && diasHasta(c.periodo.inicio) > 0 ? c.periodo.inicio : c.proximaFecha).replaceAll("-", "");
+      lineas.push("BEGIN:VEVENT", `UID:${carro.id}-${s.id}-${dia}@mantenimiento-carros`,
+        `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}Z`,
+        `DTSTART;VALUE=DATE:${dia}`, `SUMMARY:${limpiar(`🚗 ${s.tipo} — ${carro.nombre}`)}`,
+        `DESCRIPTION:${limpiar(c.texto.join(" · "))}`,
+        "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-P7D", `DESCRIPTION:${limpiar(s.tipo)}`, "END:VALARM",
+        "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:PT9H", `DESCRIPTION:${limpiar(s.tipo)}`, "END:VALARM",
+        "END:VEVENT");
+      n++;
+    }
+  }
+  lineas.push("END:VCALENDAR");
+  if (!n) { aviso("No hay fechas para exportar todavía"); return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lineas.join("\r\n")], { type: "text/calendar" }));
+  a.download = "recordatorios-carros.ics";
+  a.click();
+  aviso(`${n} recordatorios descargados. Ábrelos para agregarlos a tu calendario.`);
+};
+
+// ═══════════════════════════════════════════════════════════
+// Sesión
+// ═══════════════════════════════════════════════════════════
+function aviso(t) {
+  const el = $("#aviso");
+  el.textContent = t; el.style.display = "block";
+  clearTimeout(aviso.t); aviso.t = setTimeout(() => (el.style.display = "none"), 3500);
+}
+function cerrarSesion(msg) {
+  pin = "";
+  try { localStorage.removeItem("pin"); } catch {}
+  $("#app").classList.add("oculto");
+  $("#login").classList.remove("oculto");
+  $("#error-login").textContent = msg || "";
+}
+$("#salir").onclick = e => { e.preventDefault(); cerrarSesion(); };
+
+$("#form-login").addEventListener("submit", async e => {
+  e.preventDefault();
+  pin = $("#pin").value.trim();
+  await entrar();
+});
+
+async function entrar() {
+  try {
+    await cargar();
+    try { localStorage.setItem("pin", pin); } catch {}
+    $("#login").classList.add("oculto");
+    $("#app").classList.remove("oculto");
+  } catch (e) {
+    if (e.message !== "PIN incorrecto") cerrarSesion("No se pudo conectar: " + e.message);
+  }
+}
+
+$("#tipos").innerHTML = SUGERENCIAS.map(t => `<option value="${esc(t)}">`).join("");
+if (pin) entrar(); else cerrarSesion();
+</script>
+</body>
+</html>
