@@ -15,6 +15,7 @@ import unittest
 from datetime import datetime as _dt
 from datetime import timedelta, timezone
 from pathlib import Path
+import unittest.mock
 from unittest.mock import AsyncMock, patch
 
 RAIZ = Path(__file__).resolve().parent.parent
@@ -178,6 +179,51 @@ class Cerebro(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sistema[0]["cache_control"], {"type": "ephemeral"})
         self.assertNotIn("Fecha y hora actual", sistema[0]["text"])
         self.assertIn("Fecha y hora actual", sistema[1]["text"])
+
+
+class AnuncioYDuracion(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await memory.inicializar_db()
+
+    async def asyncTearDown(self):
+        async with memory.async_session() as session:
+            await session.execute(delete(memory.OrigenAnuncio))
+            await session.commit()
+
+    async def _nota(self, tel, titulo, msg="Quiero más información"):
+        if titulo:
+            await memory.registrar_origen_anuncio(tel, f"ev-{tel}", {"titulo": titulo}, msg)
+        return await brain._nota_primer_mensaje(msg, tel)
+
+    async def test_anuncio_buen_fin_no_ofrece_sesion_gratis(self):
+        with patch.object(brain, "datetime", reloj(2026, 11, 4, 21, 0)):
+            nota = await self._nota("5210000000901", "¡Buen Fin de tratamientos corporales! 🔥")
+        self.assertIn("no le ofrezcas primera sesión", nota)
+        self.assertIn("13 al 17", nota)
+
+    async def test_anuncio_buen_fin_terminado_sin_nota(self):
+        with patch.object(brain, "datetime", reloj(2026, 11, 18, 21, 0)):
+            self.assertEqual(await self._nota("5210000000902", "¡Buen Fin de depilación láser! 🔥"), "")
+
+    async def test_anuncio_normal_y_sin_anuncio_siguen_igual(self):
+        self.assertIn("SIN COSTO", await self._nota("5210000000903", "Tu primera sesión SIN COSTO en 2Body"))
+        self.assertIn("SIN COSTO", await self._nota("5210000000904", ""))
+        self.assertEqual(await self._nota("5210000000905", "", "Hacen botox?"), "")
+
+    async def _duracion(self, servicio, pedida=None):
+        crear = unittest.mock.Mock(return_value={"ok": False, "error": "x"})
+        args = {"nombre": "Ana", "servicio": servicio, "fecha_hora": "2026-11-06T11:00"}
+        if pedida:
+            args["duracion_min"] = pedida
+        with patch.object(brain.calendar_tool, "crear_cita", crear):
+            await brain._ejecutar_herramienta("agendar_cita", args, TEL)
+        return crear.call_args.args[4]
+
+    async def test_cita_sin_costo_dura_30(self):
+        self.assertEqual(await self._duracion("Valoración facial sin costo", 60), 30)
+        self.assertEqual(await self._duracion("Sesión corporal sin costo"), 30)
+        self.assertEqual(await self._duracion("Paquete facial 12 sesiones"), 60)
+        self.assertEqual(await self._duracion("Masaje", 90), 90)
 
 
 class RelevoCortesia(unittest.IsolatedAsyncioTestCase):

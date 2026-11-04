@@ -180,6 +180,18 @@ async def registrar_origen_anuncio(telefono: str, evento_id: str, ref: dict, tex
             await session.rollback()
 
 
+async def titulo_anuncio(telefono: str) -> str:
+    """Título del último anuncio por el que llegó esta clienta ("" si no llegó por anuncio)."""
+    async with async_session() as session:
+        titulo = await session.scalar(
+            select(OrigenAnuncio.titulo)
+            .where(OrigenAnuncio.telefono == telefono)
+            .order_by(OrigenAnuncio.creado_en.desc())
+            .limit(1)
+        )
+    return titulo or ""
+
+
 async def origenes_anuncio(desde: datetime | None = None) -> list[dict]:
     """Lista los registros de origen por anuncio (para el reporte de atribución)."""
     async with async_session() as session:

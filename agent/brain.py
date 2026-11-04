@@ -86,7 +86,8 @@ HERRAMIENTAS = [
                 },
                 "duracion_min": {
                     "type": "integer",
-                    "description": "Duración de la cita en minutos (si no sabes, usa 60).",
+                    "description": "Duración de la cita en minutos: 30 si es la cita sin costo "
+                    "(valoración o primera sesión); si no sabes, usa 60.",
                 },
             },
             "required": ["fecha"],
@@ -114,7 +115,8 @@ HERRAMIENTAS = [
                 },
                 "duracion_min": {
                     "type": "integer",
-                    "description": "Duracion en minutos. Si no sabes, usa 60.",
+                    "description": "Duracion en minutos. La cita sin costo siempre dura 30. Si no "
+                    "sabes, usa 60.",
                 },
             },
             "required": ["nombre", "servicio", "fecha_hora"],
@@ -292,6 +294,38 @@ _NOTA_ANUNCIO_GENERAL = (
     "ofrécele dos horarios y pregúntale si la quiere para rostro o para cuerpo.]"
 )
 
+_NOTA_ANUNCIO_BUEN_FIN = (
+    "\n\n[NOTA INTERNA — no la menciones: viene del anuncio «{titulo}», que promete precios especiales "
+    "de Buen Fin y agendar valoración, NO una sesión gratis: no le ofrezcas primera sesión sin costo. "
+    "Si ya preguntó algo concreto, contéstalo primero. Usa consultar_disponibilidad y en UN solo "
+    "mensaje salúdala, dile que los precios de Buen Fin son del 13 al 17 de noviembre, que su "
+    "valoración es sin costo y ofrécele dos horarios. Si el título ya dice qué le interesa, no le "
+    "preguntes rostro o cuerpo.]"
+)
+
+
+def _buen_fin_terminado() -> bool:
+    hoy = datetime.now(TZ).date()
+    for p in _promociones():
+        if "buen fin" in (p.get("nombre") or "").lower():
+            hasta = _a_fecha(p.get("hasta"))
+            return bool(hasta and hasta < hoy)
+    return True
+
+
+async def _nota_primer_mensaje(mensaje: str, telefono: str) -> str:
+    """Nota interna del primer mensaje según el anuncio del que viene. No se guarda en el historial."""
+    titulo = ""
+    if telefono:
+        try:
+            titulo = await memory.titulo_anuncio(telefono)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"No se pudo leer el anuncio de origen: {e}")
+    if "buen fin" in titulo.lower():
+        # Su texto es el mismo "Quiero más información" de los anuncios de sesión sin costo.
+        return "" if _buen_fin_terminado() else _NOTA_ANUNCIO_BUEN_FIN.format(titulo=titulo)
+    return _NOTA_ANUNCIO_GENERAL if _SALUDO_GENERAL.match(mensaje.strip()) else ""
+
 
 def _prompt_sin_agenda() -> str:
     """System prompt de los mensajes proactivos (recordatorio y seguimiento)."""
@@ -328,7 +362,7 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "(Si viene por una VALORACIÓN, en 'servicio' pon p. ej. 'Valoración facial sin costo'; "
             "cuenta como su única cita sin costo.)\n"
             "4) Al confirmarse, dígale con calidez que su espacio quedó apartado (por confirmar) y "
-            "que el equipo le confirma por aquí. La sesión dura ~60 min.\n"
+            "que el equipo le confirma por aquí. La cita sin costo dura unos 30 minutos.\n"
             "No inventes horarios: siempre revisa con la herramienta. Si la herramienta te dice "
             "que ese horario ya está ocupado, ofrece otra hora; si te dice que la clienta YA tenía "
             "esa cita, NO agendes de nuevo, solo confírmesela. Si la herramienta falla, toma la "
@@ -403,13 +437,16 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
 
         if nombre == "agendar_cita":
             inicio = datetime.fromisoformat(args["fecha_hora"])
+            servicio = args.get("servicio", "").strip() or "Tratamiento"
+            # La cita sin costo dura 30 min aunque el modelo pida otra cosa: bloquea la agenda.
+            duracion = 30 if calendar_tool.es_sesion_gratis(servicio) else int(args.get("duracion_min") or 60)
             res = await asyncio.to_thread(
                 calendar_tool.crear_cita,
                 args.get("nombre", "").strip() or "Clienta",
                 telefono or "",
-                args.get("servicio", "").strip() or "Tratamiento",
+                servicio,
                 inicio,
-                int(args.get("duracion_min") or 60),
+                duracion,
                 args.get("notas", ""),
             )
             if res.get("ok"):
@@ -529,7 +566,7 @@ async def generar_respuesta(
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     # Es el saludo con más volumen de los anuncios y solo con la regla del prompt, a veces contesta
     # con una pregunta abierta (3 de 5 en pruebas). La nota no se guarda en el historial.
-    nota = _NOTA_ANUNCIO_GENERAL if (not historial and _SALUDO_GENERAL.match(mensaje.strip())) else ""
+    nota = await _nota_primer_mensaje(mensaje, telefono) if not historial else ""
     mensajes.append({"role": "user", "content": mensaje + nota})
 
     async def _crear():

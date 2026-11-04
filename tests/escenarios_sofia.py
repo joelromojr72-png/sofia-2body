@@ -48,7 +48,7 @@ def _simular_agenda() -> None:
     calendar_tool.slots_libres = lambda fecha, *a, **k: ["10:00", "11:00", "16:00", "17:00"]
 
     def crear(nombre, telefono, servicio, inicio, dur=60, notas=""):
-        citas_creadas.append({"nombre": nombre, "servicio": servicio, "inicio": inicio.isoformat()})
+        citas_creadas.append({"nombre": nombre, "servicio": servicio, "inicio": inicio.isoformat(), "dur": dur})
         return {"ok": True, "cuando": inicio.strftime("%d/%m %H:%M")}
 
     calendar_tool.crear_cita = crear
@@ -73,8 +73,29 @@ PRECIOS_BF = r"4,?999|6,?499|8,?593|5,?075|6,?580|9,?450|10,?000"
 OCT = r"octubre|otoño|30 ?% ?\+ ?30|hasta el 31"
 TUTEO = r"\b(tú|tienes|quieres|te gustaría|tu piel|puedes|cuéntame|dime|avísame)\b"
 
+# Escenarios que llegan por un anuncio de Buen Fin (id → título del anuncio).
+ANUNCIOS = {
+    "anuncio_bf_corporal": "¡Buen Fin de tratamientos corporales! 🔥",
+    "anuncio_bf_facial": "¡Buen Fin de tratamientos faciales! 🔥",
+    "anuncio_bf_despues": "¡Buen Fin de tratamientos corporales! 🔥",
+    "anuncio_bf_pregunta": "¡Buen Fin de tratamientos corporales! 🔥",
+}
+
 # id, fecha, historial [(rol, texto)], mensaje, debe_decir[], no_debe_decir[]
 ESCENARIOS = [
+    ("anuncio_bf_corporal", NOCHE, [], "Quiero más información",
+     [r"13", r"valoraci", r"\d{1,2}(:\d\d)?"], [r"primera sesi[oó]n", r"rostro o (para )?cuerpo", OCT, TUTEO]),
+    ("anuncio_bf_facial", NOCHE, [], "Quiero más información",
+     [r"13", r"valoraci"], [r"primera sesi[oó]n", r"rostro o (para )?cuerpo", OCT, TUTEO]),
+    ("anuncio_bf_pregunta", NOCHE, [], "Bajar talla",
+     [r"13|valoraci"], [r"primera sesi[oó]n", OCT, TUTEO]),
+    ("anuncio_bf_despues", DESPUES_BF, [], "Quiero más información",
+     [], [PRECIOS_BF, OCT, TUTEO]),
+    ("msi", NOCHE, [("user", "Hola"), ("assistant", "¡Hola! Soy Sofía de 2 Body Pachuca 💜")],
+     "Aceptan meses sin intereses en buen fin?", [r"equipo"], [r"\b(3|6|9|12|18) (meses|msi)", OCT]),
+    ("duracion_cita", NOCHE, [("user", "Quiero mi plan facial"),
+      ("assistant", "Le armamos su plan en una valoración sin costo. ¿Le aparto mañana a las 11:00?")],
+     "Cuánto dura la cita?", [r"30"], [r"60 ?min", r"una hora"]),
     ("sinCosto_ganador", NOCHE, [], "¡Hola! Quiero mi sesión SIN COSTO 💜",
      [r"sin costo", r"\d{1,2}(:\d\d)?"], [PRECIOS_OCT, OCT, TUTEO]),
     ("info_generica", NOCHE, [], "¡Hola! Quiero más información",
@@ -150,6 +171,8 @@ async def correr(esc: tuple, sem: asyncio.Semaphore) -> dict:
         # main() los agrupa por fecha.
         tel = f"{TEL}{abs(hash(ident)) % 1000:03d}"
         historial = [{"role": r, "content": t} for r, t in hist]
+        if ident in ANUNCIOS:
+            await memory.registrar_origen_anuncio(tel, f"ev-{ident}", {"titulo": ANUNCIOS[ident]}, msg)
         texto, real = await brain.generar_respuesta(msg, historial, tel)
     fallos = []
     if not real:

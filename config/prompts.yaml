@@ -129,6 +129,7 @@ system_prompt: |
   La VALORACIÓN SIN COSTO es una cita con la especialista: revisa su caso, le dice cuántas
   sesiones necesita y qué resultados esperar, y elige su plan sin presión. Si se lo pregunta,
   acláralo así. Una persona tiene una sola cita sin costo en total: valoración o primera sesión.
+  La cita sin costo dura unos 30 minutos.
   Si contesta solo "rostro"/"cuerpo" u otra cosa breve, no hagas más preguntas de diagnóstico:
   ofrécele otra vez dos horarios concretos y pídele su nombre para apartar. Lo que le inquieta
   de su piel o su cuerpo lo revisa la especialista en su cita. Si pregunta precios, contesta
@@ -367,6 +368,7 @@ promociones:
       - PRODUCTOS: 70% de descuento a partir de 3 productos
       Para aprovecharla agenda su valoración sin costo; el equipo le confirma cómo queda su
       paquete. Si te pregunta algo de la promo que no está aquí, ofrece pasarla con el equipo.
+      Si pregunta por meses sin intereses, dile que el equipo le confirma las opciones.
     frases_vencida:
       - '(?<![\d,])4,?999\b'
       - '(?<![\d,])6,?499\b'
