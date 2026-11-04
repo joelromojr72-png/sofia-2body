@@ -398,6 +398,53 @@ def _en_horario_nudge_equipo(now: datetime | None = None) -> bool:
     return 9 <= now.hour < 21
 
 
+def _en_horario_relevo(now: datetime | None = None) -> bool:
+    """El relevo corre al entrar Sofía de turno (sábado 14:30, entre semana 20:00), hasta las 22:00."""
+    now = now or datetime.now(TZ)
+    return 14 <= now.hour < 22 and _sofia_de_turno(now)
+
+
+async def _ciclo_relevo(proveedor) -> int:
+    """
+    Relevo de turno: contesta UNA vez a quien escribió en horario del equipo y se quedó sin
+    respuesta. Sin esto, un lead de las 19:45 no recibía nada: Sofía callada hasta las 20:00, y
+    para cuando volvía a tocarle (20:00 del día siguiente) ya se había cerrado la ventana de 24 h.
+    """
+    from agent import brain
+
+    leads = await memory.leads_para_relevo()
+    if not leads:
+        return 0
+    enviados = 0
+    silencio = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "120")
+    for l in leads:
+        tel, inbound = l["telefono"], l["last_inbound"]
+        if await memory.equipo_activo_reciente(tel, silencio):
+            continue  # el equipo sigue en esa charla: se revisa en el próximo ciclo
+        clave = f"relevo:{tel}:{inbound}"
+        if not await memory.marcar_evento_procesado(clave):
+            continue
+        texto = await brain.generar_relevo(await memory.obtener_historial(tel), tel)
+        if texto is None:
+            await memory.liberar_evento(clave)  # falló la IA: se reintenta
+            continue
+        if texto == brain.NO_ENVIAR or not await memory.relevo_sigue_elegible(tel, inbound):
+            continue
+        try:
+            ok = await proveedor.enviar_mensaje(tel, texto)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error enviando relevo a …{tel[-4:]}: {e}")
+            ok = False
+        if ok:
+            await memory.guardar_mensaje(tel, "assistant", texto)
+            enviados += 1
+            logger.info(f"Relevo de turno enviado a …{tel[-4:]}: {texto[:60]}")
+        else:
+            await memory.liberar_evento(clave)
+        await asyncio.sleep(1.5)
+    return enviados
+
+
 async def _ciclo_nudge_equipo(proveedor) -> int:
     """
     Si la clienta no contestó el último mensaje del EQUIPO en ~3-4 h, Sofía manda UN solo
@@ -547,6 +594,9 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
                 await asyncio.sleep(intervalo_seg)
                 continue
             if habilitado():
+                # 0) Relevo: quien escribió en horario del equipo y nadie le contestó.
+                if _en_horario_relevo():
+                    await _ciclo_relevo(proveedor)
                 # 1) Toque de cierre dentro de 24 h (mensaje libre, no necesita plantilla).
                 if _en_horario_nudge():
                     await _ciclo_nudge(proveedor)

@@ -163,8 +163,8 @@ class ProveedorMeta(ProveedorWhatsApp):
                 #    con amabilidad que lo escriba (Sofía no puede escucharlos ni verlos).
                 for msg in value.get("messages", []):
                     tipo_msg = msg.get("type")
-                    if tipo_msg in ("reaction", "unsupported", "system", "ephemeral"):
-                        continue  # reacciones (👍 sobre un mensaje) y avisos: no se contestan
+                    if tipo_msg in ("reaction", "sticker", "unsupported", "system", "ephemeral"):
+                        continue  # reacciones, stickers (suelen ser un cierre) y avisos: no se contestan
                     texto = _texto_de_mensaje(msg)
                     contexto = {
                         "evento_id": msg.get("id", ""),

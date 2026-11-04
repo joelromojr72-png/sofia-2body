@@ -696,6 +696,8 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
             )
 
             if not es_respuesta_real:
+                # Se guarda lo que escribió, para no perderlo: el equipo y el relevo lo ven.
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
                 logger.warning(f"Sofía no pudo generar respuesta para {msg.telefono}; no se envía nada (lo atiende el equipo)")
                 return
 

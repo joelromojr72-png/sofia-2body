@@ -305,6 +305,19 @@ _SIN_REGISTRO_CLIENTA = (
 )
 
 
+def _sin_repetidos(mensajes: list) -> list:
+    """
+    Quita copias seguidas del mismo mensaje del mismo rol. El equipo manda tandas de imágenes
+    y cada una se guarda como "[El equipo envió una imagen]": sin esto, llenan la ventana del
+    historial y Sofía pierde lo que de verdad se platicó.
+    """
+    salida: list = []
+    for m in mensajes:
+        if not (salida and salida[-1].role == m.role and salida[-1].content == m.content):
+            salida.append(m)
+    return salida
+
+
 async def obtener_historial_equipo(telefono: str, limite: int = 20) -> list[dict]:
     """
     Historial para el recordatorio ligero de charlas del EQUIPO: igual que obtener_historial,
@@ -313,10 +326,11 @@ async def obtener_historial_equipo(telefono: str, limite: int = 20) -> list[dict
     """
     async with async_session() as session:
         r = await session.execute(
-            select(Mensaje).where(Mensaje.telefono == telefono).order_by(Mensaje.id.desc()).limit(limite)
+            select(Mensaje).where(Mensaje.telefono == telefono).order_by(Mensaje.id.desc()).limit(limite * 5)
         )
         mensajes = list(r.scalars().all())
     mensajes.reverse()
+    mensajes = _sin_repetidos(mensajes)[-limite:]
     salida: list[dict] = []
     for m in mensajes:
         if salida and salida[-1]["role"] == m.role:
@@ -340,11 +354,12 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
             select(Mensaje)
             .where(Mensaje.telefono == telefono)
             .order_by(Mensaje.id.desc())
-            .limit(limite)
+            .limit(limite * 5)
         )
         mensajes = list(resultado.scalars().all())
 
     mensajes.reverse()  # vienen del mas nuevo al mas viejo: los damos vuelta
+    mensajes = _sin_repetidos(mensajes)[-limite:]
 
     # La API de Claude exige que el historial empiece con un mensaje del usuario.
     # Si por un error anterior quedo un "assistant" suelto al principio, lo sacamos.
@@ -546,6 +561,8 @@ async def marcar_lead_agendado(telefono: str) -> None:
         if lead is None:
             lead = Lead(telefono=telefono, creado_en=ahora())
             s.add(lead)
+        if lead.estado == "opt_out":
+            return  # pidió que no le escribieran: eso no lo borra una cita
         lead.estado = "agendado"
         lead.proximo_seguimiento = None
         await s.commit()
@@ -578,6 +595,8 @@ async def pausar_seguimiento(telefono: str) -> None:
         if lead is None:
             lead = Lead(telefono=telefono, creado_en=ahora())
             s.add(lead)
+        if lead.estado == "opt_out":
+            return  # el opt-out es más fuerte que la pausa: si no, volverían a escribirle
         lead.estado = "pausado"
         lead.proximo_seguimiento = None
         lead.nudge_en = None
@@ -677,6 +696,47 @@ async def leads_para_nudge_equipo(limite: int = 40) -> list[dict]:
         )
         leads = list(r.scalars().all())
     return [{"telefono": l.telefono, "nombre": l.nombre} for l in leads]
+
+
+async def leads_para_relevo(minimo_min: int = 20, maximo_horas: float = 6, limite: int = 20) -> list[dict]:
+    """
+    Quien escribió en horario del equipo y nadie le contestó (p. ej. 19:45, casi al cerrar):
+    Sofía estaba callada y el toque de 3 h cae después de las 21:00. Su ÚLTIMO mensaje guardado
+    tiene que ser de ella; si el equipo ya respondió, aparece como 'assistant' y no entra.
+    """
+    desde, hasta = ahora() - timedelta(hours=maximo_horas), ahora() - timedelta(minutes=minimo_min)
+    async with async_session() as s:
+        r = await s.execute(
+            select(Lead)
+            .where(Lead.estado == "activo", Lead.last_inbound >= desde, Lead.last_inbound <= hasta)
+            .order_by(Lead.last_inbound)
+            .limit(limite)
+        )
+        salida = []
+        for l in r.scalars().all():
+            ult_rol = await s.scalar(
+                select(Mensaje.role)
+                .where(Mensaje.telefono == l.telefono)
+                .order_by(Mensaje.id.desc())
+                .limit(1)
+            )
+            if ult_rol == "user":
+                salida.append({"telefono": l.telefono, "last_inbound": _aware(l.last_inbound).isoformat()})
+    return salida
+
+
+async def relevo_sigue_elegible(telefono: str, last_inbound: str) -> bool:
+    """Re-chequeo justo antes de enviar: no llegó otro mensaje ni contestó el equipo."""
+    async with async_session() as s:
+        lead = await s.get(Lead, telefono)
+        if lead is None or lead.estado != "activo" or not lead.last_inbound:
+            return False
+        if _aware(lead.last_inbound).isoformat() != last_inbound:
+            return False
+        ult_rol = await s.scalar(
+            select(Mensaje.role).where(Mensaje.telefono == telefono).order_by(Mensaje.id.desc()).limit(1)
+        )
+    return ult_rol == "user"
 
 
 async def nudge_equipo_sigue_elegible(telefono: str) -> bool:

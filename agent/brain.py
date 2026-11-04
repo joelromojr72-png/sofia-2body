@@ -14,6 +14,7 @@ modo "el equipo confirma".
 import asyncio
 import logging
 import os
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -215,6 +216,88 @@ def _contexto_temporal() -> str:
     )
 
 
+def _a_fecha(valor) -> date | None:
+    """Las fechas de prompts.yaml llegan como date (sin comillas) o como texto."""
+    if isinstance(valor, date):
+        return valor
+    try:
+        return date.fromisoformat(str(valor))
+    except ValueError:
+        return None
+
+
+def _promociones() -> list[dict]:
+    return cargar_config_prompts().get("promociones") or []
+
+
+def _bloque_promociones() -> str:
+    """
+    Las promos que el modelo puede ver HOY, calculadas por código desde prompts.yaml.
+
+    Una promo vencida no le llega con sus precios: un aviso en el prompt tipo "si ya pasó el
+    31, no la ofrezcas" no bastó (el 3 de noviembre seguía ofreciendo la de octubre).
+    """
+    hoy = datetime.now(TZ).date()
+    vigentes, proximas, terminadas = [], [], []
+    for p in _promociones():
+        desde, hasta = _a_fecha(p.get("desde")), _a_fecha(p.get("hasta"))
+        if not desde or not hasta:
+            logger.error(f"Promo con fechas inválidas en prompts.yaml: {p.get('nombre')}")
+            continue
+        fin = f"{hasta.day} de {_MESES[hasta.month - 1]}"
+        rango = f"del {desde.day} de {_MESES[desde.month - 1]} al {fin}"
+        contenido = (p.get("contenido") or "").strip()
+        if hasta < hoy:
+            terminadas.append(p.get("nombre", ""))
+        elif desde <= hoy:
+            vigentes.append(f"### {p.get('nombre')} — VIGENTE, termina el {fin}\n{contenido}")
+        elif (_a_fecha(p.get("avisar_desde")) or desde) <= hoy:
+            proximas.append(
+                f"### {p.get('nombre')} — TODAVÍA NO EMPIEZA, será {rango}\n{contenido}\n"
+                "Menciónela solo si pregunta por promociones, descuentos o Buen Fin. Entonces dele con "
+                "gusto las fechas y los precios, y aclare que esos "
+                "precios solo aplican esos días; hoy rigen los precios de lista. Puede apartar ya "
+                "su valoración sin costo para aprovecharla."
+            )
+    partes = ["\n\n## Promociones (calculado con la fecha de hoy; esto manda)"]
+    partes += vigentes or ["HOY NO HAY NINGUNA PROMOCIÓN VIGENTE: usa la lista de precios y el plan de pagos."]
+    partes += proximas
+    if terminadas:
+        partes.append(
+            "YA TERMINARON y NO EXISTEN: " + "; ".join(terminadas) + ". Si la clienta o un mensaje "
+            "anterior del chat las menciona, aclárele con amabilidad que esa promo ya terminó y "
+            "ofrézcale lo vigente o la lista de precios. Nunca repitas sus precios ni sus fechas."
+        )
+    return "\n\n".join(partes)
+
+
+def _frase_vencida(texto: str) -> str | None:
+    """Última barrera: devuelve lo que `texto` menciona de una promo que ya terminó, si algo."""
+    hoy = datetime.now(TZ).date()
+    for p in _promociones():
+        hasta = _a_fecha(p.get("hasta"))
+        if not hasta or hasta >= hoy:
+            continue
+        for patron in p.get("frases_vencida") or []:
+            m = re.search(patron, texto, re.IGNORECASE)
+            if m:
+                return m.group(0)
+    return None
+
+
+_SALUDO_GENERAL = re.compile(r"^\W*(hola\W+)?(quiero|m[aá]s|me das?|me dan?)\W*(m[aá]s\W+)?informaci[oó]n\b", re.I)
+_NOTA_ANUNCIO_GENERAL = (
+    "\n\n[NOTA INTERNA — no la menciones: viene del anuncio de su primera sesión SIN COSTO. Usa "
+    "consultar_disponibilidad y en UN solo mensaje salúdala, dile que su primera sesión es SIN COSTO, "
+    "ofrécele dos horarios y pregúntale si la quiere para rostro o para cuerpo.]"
+)
+
+
+def _prompt_sin_agenda() -> str:
+    """System prompt de los mensajes proactivos (recordatorio y seguimiento)."""
+    return cargar_system_prompt() + _contexto_temporal() + _bloque_promociones()
+
+
 def _instrucciones_agenda(hay_agenda: bool) -> str:
     """Instruccion en runtime segun si la agenda automatica esta prendida o no."""
     if hay_agenda:
@@ -242,6 +325,8 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "3) Cuando ella acepte una hora concreta (de las libres), llama `agendar_cita` (en "
             "'servicio' pon lo que va a vivir: p. ej. 'Sesión corporal sin costo', 'Sesión facial "
             "sin costo' o el tratamiento/paquete que pidió).\n"
+            "(Si viene por una VALORACIÓN, en 'servicio' pon p. ej. 'Valoración facial sin costo'; "
+            "cuenta como su única cita sin costo.)\n"
             "4) Al confirmarse, dígale con calidez que su espacio quedó apartado (por confirmar) y "
             "que el equipo le confirma por aquí. La sesión dura ~60 min.\n"
             "No inventes horarios: siempre revisa con la herramienta. Si la herramienta te dice "
@@ -429,13 +514,23 @@ async def generar_respuesta(
         return obtener_mensaje_fallback(), False
 
     hay_agenda = calendar_tool.calendario_configurado()
-    system_prompt = (
-        cargar_system_prompt() + _contexto_temporal() + _instrucciones_agenda(hay_agenda)
-    )
+    # Lo que no cambia va primero y se marca para el caché de Anthropic: cada mensaje lleva unos
+    # 13 mil tokens de prompt. La fecha y las promos van después, porque cambian.
+    system_prompt = [
+        {
+            "type": "text",
+            "text": cargar_system_prompt() + _instrucciones_agenda(hay_agenda),
+            "cache_control": {"type": "ephemeral"},
+        },
+        {"type": "text", "text": _contexto_temporal() + _bloque_promociones()},
+    ]
     herramientas = HERRAMIENTAS if hay_agenda else []
 
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
-    mensajes.append({"role": "user", "content": mensaje})
+    # Es el saludo con más volumen de los anuncios y solo con la regla del prompt, a veces contesta
+    # con una pregunta abierta (3 de 5 en pruebas). La nota no se guarda en el historial.
+    nota = _NOTA_ANUNCIO_GENERAL if (not historial and _SALUDO_GENERAL.match(mensaje.strip())) else ""
+    mensajes.append({"role": "user", "content": mensaje + nota})
 
     async def _crear():
         global _soporta_esfuerzo
@@ -459,6 +554,10 @@ async def generar_respuesta(
                 return await client.messages.create(**params)
             raise
 
+    corregida = False
+    # Lo que escribe ANTES de usar una herramienta (el saludo, casi siempre) también es para la
+    # clienta: si solo se manda el último turno, le llega "Tengo mañana a las 11" sin contexto.
+    previos: list[str] = []
     try:
         for _ in range(MAX_VUELTAS_TOOLS):
             respuesta = await _crear()
@@ -467,6 +566,8 @@ async def generar_respuesta(
                 # Guardamos el turno del modelo (con los bloques tool_use) y respondemos
                 # cada herramienta con su tool_result, para que Claude siga con el resultado.
                 mensajes.append({"role": "assistant", "content": respuesta.content})
+                if _extraer_texto(respuesta):
+                    previos.append(_extraer_texto(respuesta))
                 resultados = []
                 for bloque in respuesta.content:
                     if bloque.type == "tool_use":
@@ -493,9 +594,25 @@ async def generar_respuesta(
             if not texto:
                 logger.warning("Claude devolvio una respuesta sin texto")
                 return obtener_mensaje_fallback(), False
+            texto = "\n\n".join(previos + [texto])
+            vencida = _frase_vencida(texto)
+            if vencida:
+                logger.warning(f"Respuesta con promo vencida ('{vencida}') para …{telefono[-4:]}")
+                if corregida:
+                    # Mejor callar (lo atiende el equipo) que prometer un precio que ya no existe.
+                    return obtener_mensaje_fallback(), False
+                corregida = True
+                previos.clear()
+                mensajes.append({"role": "assistant", "content": texto})
+                mensajes.append({"role": "user", "content": (
+                    f"[NOTA INTERNA — no la menciones: tu mensaje dice '{vencida}', de una promo que "
+                    "YA TERMINÓ, y no se envió. Reescríbelo sin mencionar ese precio ni esa fecha.]"
+                )})
+                continue
             logger.info(
                 f"Respuesta generada con {MODELO} "
-                f"({respuesta.usage.input_tokens} in / {respuesta.usage.output_tokens} out)"
+                f"({respuesta.usage.input_tokens} in / {respuesta.usage.output_tokens} out, "
+                f"caché {getattr(respuesta.usage, 'cache_read_input_tokens', 0) or 0} leídos)"
             )
             _marcar_cerebro(True)
             return texto, True
@@ -520,7 +637,7 @@ async def generar_recordatorio_equipo(historial: list[dict]) -> str | None:
     """
     if not historial or historial[-1]["role"] != "assistant":
         return NO_ENVIAR  # no hay un mensaje del equipo esperando respuesta
-    system_prompt = cargar_system_prompt() + _contexto_temporal()
+    system_prompt = _prompt_sin_agenda()
     instruccion = (
         "[NOTA INTERNA — no la menciones: esta charla la lleva una persona del EQUIPO de 2Body. "
         "La clienta no ha contestado el ÚLTIMO mensaje del equipo desde hace unas horas. Escribe "
@@ -549,7 +666,7 @@ async def generar_recordatorio_equipo(historial: list[dict]) -> str | None:
     texto = _extraer_texto(r)
     if not texto:
         return None
-    return NO_ENVIAR if NO_ENVIAR in texto else texto
+    return NO_ENVIAR if (NO_ENVIAR in texto or _frase_vencida(texto)) else texto
 
 
 async def generar_seguimiento(historial: list[dict]) -> str | None:
@@ -559,13 +676,15 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
     """
     if not historial:
         return None
-    system_prompt = cargar_system_prompt() + _contexto_temporal()
+    system_prompt = _prompt_sin_agenda()
     instruccion = (
         "[NOTA INTERNA — no la menciones: la clienta dejó la charla a medias y aún no agenda. "
         "Háblale de USTED. Escríbele UN SOLO mensaje corto, cálido y con clase, tipo recordatorio "
         "de VALOR, NO una encuesta. Dale una razón concreta y amable (el resultado/beneficio de lo "
-        "que le interesó) e invítala con suavidad a vivir su primera sesión SIN COSTO (corporal o "
-        "facial) cuando guste, dejando la puerta abierta. PROHIBIDO volver a preguntarle qué le "
+        "que le interesó) e invítala con suavidad a lo que ya venían platicando: su plan con su "
+        "valoración sin costo, o su primera sesión sin costo si así llegó y aún no la tiene; si ya "
+        "la tuvo, no se la ofrezcas. Déjale la puerta abierta. Habla de lo que ofrece 2 Body; no "
+        "pongas palabras en su boca ('le encantaría…'). PROHIBIDO volver a preguntarle qué le "
         "preocupa o qué busca (nada de '¿sigue siendo X lo que más le preocupa?': eso cansa). Lee "
         "todo el chat (incluye lo que dijo el equipo): no repitas lo ya dicho, no la regañes por no "
         "contestar y no la satures. Suena natural, sin presión. Máx 2 renglones, 1 emoji.]"
@@ -581,4 +700,37 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
         _marcar_cerebro(False, str(e))
         return None
     texto = _extraer_texto(r)
+    if texto and _frase_vencida(texto):
+        logger.warning("Seguimiento descartado: mencionaba una promo vencida")
+        return None
     return texto or None
+
+
+# Cortesías que no piden respuesta. Con esto el relevo ni gasta IA ni la deja insistir.
+_SOLO_CORTESIA = re.compile(
+    r"^\W*$|^\W*((muchas |mil )?gracias|ok(ay|i)?|va|vale|sale|listo|perfecto|excelente|enterad[oa]|"
+    r"confirmad[oa]|s[ií]|no|bien|bye|adi[oó]s|hasta luego|ya qued[oó])"
+    r"(\W+((muchas |mil )?gracias|ya qued[oó]|listo|perfecto|ok|bye|adi[oó]s))*\W*$",
+    re.IGNORECASE,
+)
+
+
+async def generar_relevo(historial: list[dict], telefono: str = "") -> str | None:
+    """
+    Contesta a quien escribió casi al cerrar el equipo y se quedó sin respuesta. El historial
+    termina en el mensaje de la clienta. Devuelve el texto, NO_ENVIAR o None si falló.
+    """
+    if not historial or historial[-1]["role"] != "user":
+        return NO_ENVIAR
+    if _SOLO_CORTESIA.match(historial[-1]["content"].strip()):
+        return NO_ENVIAR
+    nota = (
+        "\n\n[NOTA INTERNA — no la menciones: esto lo escribió hace rato y nadie le contestó. "
+        "Contéstale normal, con una disculpa breve por la demora y sin repetir nada que ya le "
+        "hayan dicho. Si su mensaje no necesita respuesta (gracias, ok, una despedida, una "
+        "confirmación) o ya tiene lo que pidió, responde EXACTAMENTE NO_ENVIAR.]"
+    )
+    texto, real = await generar_respuesta(historial[-1]["content"] + nota, historial[:-1], telefono)
+    if not real:
+        return None
+    return NO_ENVIAR if NO_ENVIAR in texto else texto
