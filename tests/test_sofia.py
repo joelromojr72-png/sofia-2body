@@ -12,11 +12,12 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import date
 from datetime import datetime as _dt
 from datetime import timedelta, timezone
 from pathlib import Path
 import unittest.mock
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 RAIZ = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RAIZ))
@@ -30,7 +31,7 @@ os.environ["META_APP_SECRET"] = "secreto-de-prueba"
 import httpx  # noqa: E402
 from sqlalchemy import delete, select  # noqa: E402
 
-from agent import brain, followup, main, memory  # noqa: E402
+from agent import brain, calendar_tool, followup, main, memory  # noqa: E402
 
 TZ = main.TZ_NEGOCIO
 TEL = "5210000000001"
@@ -224,6 +225,78 @@ class AnuncioYDuracion(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._duracion("Sesión corporal sin costo"), 30)
         self.assertEqual(await self._duracion("Paquete facial 12 sesiones"), 60)
         self.assertEqual(await self._duracion("Masaje", 90), 90)
+
+
+class UnaGratisALaVez(unittest.TestCase):
+    """Dos sesiones sin costo nunca a la misma hora, aunque una sea facial y la otra corporal."""
+
+    FECHA = date(2030, 1, 7)  # lunes
+
+    def _evento(self, titulo, hora=10, id_="ajeno", creado="2030-01-01T00:00:00.000Z", tel="5217710000000"):
+        return ("cal", {
+            "id": id_, "summary": titulo, "created": creado, "status": "tentative",
+            "description": f"WhatsApp: +{tel}\nServicio: {titulo}",
+            "start": {"dateTime": f"2030-01-07T{hora:02d}:00:00-06:00"},
+            "end": {"dateTime": f"2030-01-07T{hora + 1:02d}:00:00-06:00"},
+        })
+
+    def _crear(self, servicio, existentes, recheck=None, tel="5217719999999"):
+        svc = MagicMock()
+        svc.events.return_value.insert.return_value.execute.return_value = {
+            "id": "nuestro", "created": "2030-01-01T00:00:01.000Z"}
+        lecturas = [existentes, recheck if recheck is not None else existentes]
+        with patch.object(calendar_tool, "_obtener_servicio", lambda: svc), \
+             patch.object(calendar_tool, "sesion_gratis_previa", lambda *a, **k: None), \
+             patch.object(calendar_tool, "_eventos_dia_todos", side_effect=lecturas):
+            inicio = _dt(2030, 1, 7, 10, 0, tzinfo=calendar_tool.TZ)
+            return calendar_tool.crear_cita("Ana Ruiz", tel, servicio, inicio, 30), svc
+
+    def _libres(self, servicio, citas):
+        with patch.object(calendar_tool, "citas_del_dia", lambda f: citas):
+            return calendar_tool.slots_libres(self.FECHA, 30, 60, 20, servicio)
+
+    def test_rechaza_gratis_de_otro_servicio(self):
+        r, svc = self._crear("Sesión corporal sin costo", [self._evento("Lupita Exp. Única - Facial")])
+        self.assertFalse(r["ok"])
+        self.assertIn("sin costo", r["error"])
+        svc.events.return_value.insert.assert_not_called()
+
+    def test_valoracion_tambien_cuenta(self):
+        r, _ = self._crear("Valoración facial sin costo", [self._evento("Lupita Exp. Única - Corporal")])
+        self.assertFalse(r["ok"])
+
+    def test_gratis_junto_a_pagada_de_otro_servicio_si(self):
+        r, _ = self._crear("Sesión corporal sin costo", [self._evento("Tratamiento facial")])
+        self.assertTrue(r["ok"])
+
+    def test_pagada_junto_a_gratis_de_otro_servicio_si(self):
+        r, _ = self._crear("Tratamiento corporal", [self._evento("Lupita Exp. Única - Facial")])
+        self.assertTrue(r["ok"])
+
+    def test_con_costo_no_cuenta_como_gratis(self):
+        r, _ = self._crear("Sesión corporal sin costo", [self._evento("Lupita Exp. Única CON COSTO - Facial")])
+        self.assertTrue(r["ok"])
+
+    def test_carrera_cede_si_la_otra_gratis_fue_primero(self):
+        r, svc = self._crear("Sesión corporal sin costo", [], [self._evento("Sesión facial sin costo")])
+        self.assertFalse(r["ok"])
+        svc.events.return_value.delete.assert_called_once()
+
+    def test_carrera_empate_exacto_solo_cede_una(self):
+        hora = "2030-01-01T00:00:01.000Z"
+        menor, _ = self._crear("Sesión corporal sin costo", [], [self._evento("Sesión facial sin costo", id_="aaa", creado=hora)])
+        mayor, _ = self._crear("Sesión corporal sin costo", [], [self._evento("Sesión facial sin costo", id_="zzz", creado=hora)])
+        self.assertFalse(menor["ok"])  # "aaa" va antes que "nuestro": cedemos
+        self.assertTrue(mayor["ok"])   # "zzz" va después: cede la otra
+
+    def test_slots_gratis_no_ofrece_la_hora_de_otra_gratis(self):
+        cita = {"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "faciales", "gratis": True}
+        self.assertNotIn("10:00", self._libres("Sesión corporal sin costo", [cita]))
+        self.assertIn("11:00", self._libres("Sesión corporal sin costo", [cita]))
+
+    def test_slots_pagada_si_ofrece_esa_hora(self):
+        cita = {"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "faciales", "gratis": True}
+        self.assertIn("10:00", self._libres("Tratamiento corporal", [cita]))
 
 
 class RelevoCortesia(unittest.IsolatedAsyncioTestCase):

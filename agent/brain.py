@@ -69,8 +69,9 @@ HERRAMIENTAS = [
             "ocupadas y el horario del spa). Úsala SIEMPRE antes de proponerle u ofrecerle "
             "cualquier hora a la clienta: nunca ofrezcas una hora sin haberla consultado aquí. "
             "Ofrécele solo horarios que esta herramienta marque libres. Pásale SIEMPRE el "
-            "servicio: las citas de OTRO servicio a la misma hora no estorban (cada servicio "
-            "tiene su cabina), así salen más horarios."
+            "servicio tal como lo vas a agendar (con 'sin costo' si lo es): las citas de OTRO "
+            "servicio a la misma hora no estorban (cada servicio tiene su cabina), así salen más "
+            "horarios; pero dos sesiones sin costo nunca coinciden."
         ),
         "input_schema": {
             "type": "object",
@@ -349,7 +350,8 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "ofrécele 1-2 horarios ÚNICAMENTE de los que la herramienta marque libres. NUNCA "
             "ofrezcas, confirmes ni des por buena una hora sin haberla verificado ahí. Hay UNA "
             "sola cabina por servicio (p. ej. una de facial): a la misma hora pueden coincidir un "
-            "facial y un corporal, pero NUNCA dos faciales (ni dos del mismo servicio). Si el "
+            "facial y un corporal, pero NUNCA dos faciales (ni dos del mismo servicio) ni dos "
+            "sesiones sin costo o valoraciones, aunque una sea facial y la otra corporal. Si el "
             "horario que pide está lleno para ese servicio, ofrécele otro horario o, si le "
             "interesa, otro servicio en esa hora.\n"
             "REGLA: a cada persona se le regala UNA SOLA sesión sin costo en total (facial O "

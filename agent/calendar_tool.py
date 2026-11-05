@@ -231,6 +231,17 @@ def es_sesion_gratis(servicio: str) -> bool:
     return bool(_ES_GRATIS.search(servicio or ""))
 
 
+def _es_cita_gratis(ev: dict) -> bool:
+    """
+    ¿Esta cita ya agendada es una sesión sin costo (Exp. Única / valoración)? Regla de 2Body:
+    solo UNA a la vez en todo el spa, aunque una sea facial y la otra corporal. Se mira el
+    título y el 'Servicio:', no las notas, que pueden mencionar una valoración de paso.
+    """
+    m = re.search(r"Servicio:\s*(.+)", ev.get("description", "") or "")
+    texto = (ev.get("summary", "") or "") + " " + (m.group(1) if m else "")
+    return bool(_ES_GRATIS.search(texto)) and not re.search(r"con\s+costo|cancel", texto, re.I)
+
+
 def sesion_gratis_previa(telefono: str, nombre: str = "", ignorar_dia: date | None = None,
                          dias_atras: int = 365, dias_adelante: int = 120) -> dict | None:
     """
@@ -457,6 +468,7 @@ def citas_del_dia(fecha: date) -> list[dict]:
                 "fin": df.strftime("%H:%M"),
                 "titulo": ev.get("summary", "Ocupado"),
                 "categoria": _categoria_evento(cal_id, ev),
+                "gratis": _es_cita_gratis(ev),
             }
         )
     return citas
@@ -468,10 +480,11 @@ def slots_libres(
     """
     Horarios de inicio REALMENTE LIBRES de un día para ese servicio, para que Sofía ofrezca
     solo huecos que no chocan. Una cita de OTRO servicio a la misma hora no estorba (se
-    empalman); sin servicio, cualquier cita ocupa el horario.
+    empalman), salvo que ambas sean sin costo; sin servicio, cualquier cita ocupa el horario.
     Solo horas EN PUNTO: la clínica agenda cada hora (9:00, 10:00, 11:00...).
     """
     cat_nueva = categoria_servicio(servicio) if servicio else None
+    nueva_gratis = es_sesion_gratis(servicio)
     hd = horario_dia(fecha)
     if hd is None:
         return []  # domingo / cerrado
@@ -487,7 +500,7 @@ def slots_libres(
         except (ValueError, KeyError):
             continue
         todas.append((hi, hf))
-        if _chocan(cat_nueva, c.get("categoria")):
+        if _chocan(cat_nueva, c.get("categoria")) or (nueva_gratis and c.get("gratis")):
             ocupadas.append((hi, hf))
 
     ahora = datetime.now(TZ)
@@ -670,9 +683,11 @@ def crear_cita(
     # Se revisa el traslape contra TODOS los calendarios de servicio:
     #   • Traslape de ESTA MISMA clienta → ya tenía cita: NO duplicamos (idempotente).
     #   • Traslape de OTRA clienta del MISMO servicio (o de servicio desconocido) → ocupado.
+    #   • Traslape de OTRA clienta con sesión sin costo, si esta también lo es → ocupado.
     #   • Traslape de OTRA clienta de OTRO servicio → se empalma sin problema.
     existentes = list(_eventos_dia_todos(svc, inicio.date()))  # [(cal_id, evento), ...]
     cat_nueva = categoria_servicio(servicio)
+    nueva_gratis = es_sesion_gratis(servicio)
     simultaneas = 0  # citas de OTRAS clientas a esa hora (tope MAX_CITAS_SIMULTANEAS)
 
     for _cal, ev in existentes:
@@ -705,6 +720,12 @@ def crear_cita(
                 return {
                     "ok": False,
                     "error": f"A esa hora ({inicio.strftime('%H:%M')}) ya hay {MAX_CITAS_SIMULTANEAS} citas; ofrece otra hora.",
+                }
+            if nueva_gratis and _es_cita_gratis(ev):
+                logger.info(f"Ya hay otra sesión sin costo, se rechaza: {inicio.isoformat()}")
+                return {
+                    "ok": False,
+                    "error": f"A esa hora ({inicio.strftime('%H:%M')}) ya hay otra sesión sin costo; ofrece otra hora.",
                 }
             if not _chocan(cat_nueva, _categoria_evento(_cal, ev)):
                 continue  # otro servicio: se empalma
@@ -796,9 +817,11 @@ def crear_cita(
                 od = "".join(c for c in otro.get("description", "") if c.isdigit())
                 if tel_digits and tel_digits in od:
                     continue  # otra cita de la MISMA clienta, no un empalme con alguien más
-                antes = otro.get("created", "") < nuestro_created
+                # Si Google les puso la misma hora de creación, desempata el id: así solo cede una.
+                antes = (otro.get("created", ""), otro.get("id", "")) < (nuestro_created, nuestro_id)
                 previas += 1 if antes else 0
-                if not _chocan(cat_nueva, _categoria_evento(_cal, otro)) and previas < MAX_CITAS_SIMULTANEAS:
+                dos_gratis = nueva_gratis and _es_cita_gratis(otro)
+                if not dos_gratis and not _chocan(cat_nueva, _categoria_evento(_cal, otro)) and previas < MAX_CITAS_SIMULTANEAS:
                     continue  # otro servicio y sin pasar el tope: se puede empalmar
                 if antes:
                     try:
