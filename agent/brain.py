@@ -71,7 +71,7 @@ HERRAMIENTAS = [
             "Ofrécele solo horarios que esta herramienta marque libres. Pásale SIEMPRE el "
             "servicio tal como lo vas a agendar (con 'sin costo' si lo es): las citas de OTRO "
             "servicio a la misma hora no estorban (cada servicio tiene su cabina), así salen más "
-            "horarios; pero dos sesiones sin costo nunca coinciden."
+            "horarios; pero dos sesiones sin costo no coinciden (salvo el sábado, si son de servicio distinto)."
         ),
         "input_schema": {
             "type": "object",
@@ -351,7 +351,7 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "ofrezcas, confirmes ni des por buena una hora sin haberla verificado ahí. Hay UNA "
             "sola cabina por servicio (p. ej. una de facial): a la misma hora pueden coincidir un "
             "facial y un corporal, pero NUNCA dos faciales (ni dos del mismo servicio) ni dos "
-            "sesiones sin costo o valoraciones, aunque una sea facial y la otra corporal. Si el "
+            "sesiones sin costo o valoraciones, aunque una sea facial y la otra corporal (el sábado sí pueden coincidir una facial y una corporal sin costo, nunca dos del mismo servicio). Si el "
             "horario que pide está lleno para ese servicio, ofrécele otro horario o, si le "
             "interesa, otro servicio en esa hora.\n"
             "REGLA: a cada persona se le regala UNA SOLA sesión sin costo en total (facial O "

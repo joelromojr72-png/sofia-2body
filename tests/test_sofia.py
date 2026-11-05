@@ -291,6 +291,31 @@ class UnaGratisALaVez(unittest.TestCase):
                 r, _ = self._crear(nueva, [self._evento(agendada)])
                 self.assertEqual(r["ok"], se_puede, r)
 
+    def test_sabado_si_facial_y_corporal_gratis(self):
+        sabado = date(2030, 1, 12)
+        casos = [
+            ("Sesión corporal sin costo", "Lupita Exp. Única - Facial", True),
+            ("Sesión corporal sin costo", "Lupita Exp. Única - Corporal", False),
+        ]
+        for nueva, agendada, se_puede in casos:
+            with self.subTest(nueva=nueva, agendada=agendada):
+                ev = self._evento(agendada)
+                for k in ("start", "end"):
+                    ev[1][k]["dateTime"] = ev[1][k]["dateTime"].replace("2030-01-07", "2030-01-12")
+                svc = MagicMock()
+                svc.events.return_value.insert.return_value.execute.return_value = {
+                    "id": "nuestro", "created": "2030-01-01T00:00:01.000Z"}
+                with patch.object(calendar_tool, "_obtener_servicio", lambda: svc), \
+                     patch.object(calendar_tool, "sesion_gratis_previa", lambda *a, **k: None), \
+                     patch.object(calendar_tool, "_eventos_dia_todos", side_effect=[[ev], [ev]]):
+                    r = calendar_tool.crear_cita("Ana Ruiz", "5217719999999", nueva,
+                                                 _dt(2030, 1, 12, 10, 0, tzinfo=calendar_tool.TZ), 30)
+                self.assertEqual(r["ok"], se_puede, r)
+        citas = [{"inicio": "10:00", "fin": "10:30", "categoria": "faciales", "gratis": True}]
+        with patch.object(calendar_tool, "citas_del_dia", lambda f: citas):
+            self.assertIn("10:00", calendar_tool.slots_libres(sabado, 30, 60, 20, "Sesión corporal sin costo"))
+            self.assertNotIn("10:00", calendar_tool.slots_libres(sabado, 30, 60, 20, "Sesión facial sin costo"))
+
     def test_exp_unica_con_costo_no_es_gratis(self):
         r, _ = self._crear("Exp. Única con costo - Facial", [self._evento("Lupita Exp. Única - Corporal")])
         self.assertTrue(r["ok"], r)

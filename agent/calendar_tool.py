@@ -250,6 +250,15 @@ def es_sesion_gratis(servicio: str) -> bool:
     return bool(_ES_GRATIS.search(servicio or "")) and not re.search(r"con\s+costo", servicio or "", re.I)
 
 
+def _una_gratis_por_hora(fecha: date) -> bool:
+    """
+    Entre semana solo cabe UNA sesión sin costo por hora en todo el spa. El sábado (dicho por
+    Joel, 5-nov) sí pueden coincidir una facial y una corporal: ahí solo manda la regla de
+    una cabina por servicio.
+    """
+    return fecha.weekday() != 5
+
+
 def _es_cita_gratis(ev: dict) -> bool:
     """
     ¿Esta cita ya agendada es una sesión sin costo (Exp. Única / valoración)? Regla de 2Body:
@@ -503,7 +512,7 @@ def slots_libres(
     Solo horas EN PUNTO: la clínica agenda cada hora (9:00, 10:00, 11:00...).
     """
     cat_nueva = categoria_servicio(servicio) if servicio else None
-    nueva_gratis = es_sesion_gratis(servicio)
+    nueva_gratis = es_sesion_gratis(servicio) and _una_gratis_por_hora(fecha)
     hd = horario_dia(fecha)
     if hd is None:
         return []  # domingo / cerrado
@@ -706,7 +715,7 @@ def crear_cita(
     #   • Traslape de OTRA clienta de OTRO servicio → se empalma sin problema.
     existentes = list(_eventos_dia_todos(svc, inicio.date()))  # [(cal_id, evento), ...]
     cat_nueva = categoria_servicio(servicio)
-    nueva_gratis = es_sesion_gratis(servicio)
+    nueva_gratis = es_sesion_gratis(servicio) and _una_gratis_por_hora(inicio.date())
     simultaneas = 0  # citas de OTRAS clientas a esa hora (tope MAX_CITAS_SIMULTANEAS)
 
     for _cal, ev in existentes:
