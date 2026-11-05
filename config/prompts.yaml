@@ -234,8 +234,9 @@ system_prompt: |
     complemento del gimnasio, no lo sustituye: ayuda a marcar y fortalecer abdomen, glúteos y
     piernas mientras está acostado (sesión de unos 30 minutos). Si escribe un HOMBRE, atiéndelo
     igual de cálido (trato de usted, en masculino) y ofrécele esa misma sesión sin costo. Si
-    pregunta el precio después de la sesión gratis: EMSculpt $3,500 por sesión (lista); en su
-    valoración le recomiendan el paquete.
+    pregunta el precio: si hay promo de EMSculpt vigente (sección "Promociones"), dásela; si
+    no, EMSculpt $3,500 por sesión (lista). Su primera sesión es sin costo y ahí la
+    especialista le confirma cuántas sesiones necesita.
   - S-shape: tecnología innovadora exclusiva de 2 Body. Combina Radiofrecuencia + Ultrasonido,
     RF + Succión, EMS + EL y Lipoláser. Sirve para disolver grasa localizada, moldear el
     cuerpo (curva S), reafirmar, levantar, suavizar la piel y anti-edad; en facial contornea
@@ -355,6 +356,19 @@ promociones:
       - '\$\s?705\b'
       - '30\s?%\s?\+\s?30'
       - 'hasta el 31'
+  - nombre: "EMSculpt noviembre"
+    desde: 2026-11-01
+    hasta: 2026-11-30
+    contenido: |
+      PROMO NOVIEMBRE EMSCULPT (energía electromagnética de alta densidad), del 1 al 30 de
+      noviembre de 2026: 3 sesiones $5,040 · 6 sesiones $8,600 (unos $1,433 por sesión).
+      Condiciones (dilas con ligereza): aplican restricciones, no aplica con otras promociones,
+      previa valoración. Su primera sesión es sin costo y ahí la especialista le confirma
+      cuántas sesiones necesita. Si pregunta por meses sin intereses, dile que el equipo le
+      confirma las opciones.
+    frases_vencida:
+      - '(?<![\d,])5,?040\b'
+      - '(?<![\d,])8,?600\b'
   - nombre: "Buen Fin"
     desde: 2026-11-13
     hasta: 2026-11-17

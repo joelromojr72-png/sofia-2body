@@ -88,6 +88,12 @@ class Promos(unittest.TestCase):
         self.assertNotIn("6,500", b)
         self.assertNotIn("5,999", b)
         self.assertIn("YA TERMINARON", b)
+        self.assertIn("EMSculpt noviembre — VIGENTE", b)
+
+    def test_emsculpt_noviembre_vence_el_30(self):
+        self.assertIn("8,600", self.bloque(2026, 11, 30, 19, 0))
+        b = self.bloque(2026, 12, 1, 9, 0)
+        self.assertNotIn("8,600", b)
         self.assertIn("NO HAY NINGUNA PROMOCIÓN VIGENTE", b)
 
     def test_octubre_si_vigente_el_31(self):
