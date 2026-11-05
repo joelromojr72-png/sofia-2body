@@ -246,7 +246,8 @@ def _tokens(texto: str) -> set[str]:
 
 
 def es_sesion_gratis(servicio: str) -> bool:
-    return bool(_ES_GRATIS.search(servicio or ""))
+    # "Exp. Única CON COSTO" es de paga: no dura 30 min ni cuenta como la gratis de nadie.
+    return bool(_ES_GRATIS.search(servicio or "")) and not re.search(r"con\s+costo", servicio or "", re.I)
 
 
 def _es_cita_gratis(ev: dict) -> bool:

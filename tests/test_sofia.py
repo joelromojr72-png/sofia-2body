@@ -273,6 +273,34 @@ class UnaGratisALaVez(unittest.TestCase):
         r, _ = self._crear("Tratamiento corporal", [self._evento("Lupita Exp. Única - Facial")])
         self.assertTrue(r["ok"])
 
+    def test_matriz_de_la_regla_de_joel(self):
+        # (nueva, ya agendada, ¿se puede?)
+        casos = [
+            ("Sesión corporal sin costo", "Lupita Exp. Única - Facial", False),   # dos gratis, nunca
+            ("Sesión facial sin costo", "Valoración facial sin costo", False),
+            ("Tratamiento facial", "Lupita Exp. Única - Corporal", True),         # gratis corporal + facial de paga
+            ("Sesión corporal sin costo", "Tratamiento facial", True),
+            ("Tratamiento facial", "Lupita Exp. Única - Facial", False),          # misma cabina
+            ("Sesión facial sin costo", "Tratamiento facial", False),
+            ("Tratamiento corporal", "Tratamiento facial", True),                 # otros servicios, distintos
+            ("Masaje relajante", "Depilación axilas", True),
+            ("Tratamiento facial", "Hidrofacial", False),                         # mismo servicio
+        ]
+        for nueva, agendada, se_puede in casos:
+            with self.subTest(nueva=nueva, agendada=agendada):
+                r, _ = self._crear(nueva, [self._evento(agendada)])
+                self.assertEqual(r["ok"], se_puede, r)
+
+    def test_exp_unica_con_costo_no_es_gratis(self):
+        r, _ = self._crear("Exp. Única con costo - Facial", [self._evento("Lupita Exp. Única - Corporal")])
+        self.assertTrue(r["ok"], r)
+
+    def test_libres_gratis_corporal_deja_facial_de_paga(self):
+        citas = [{"inicio": "10:00", "fin": "10:30", "categoria": "corporales", "gratis": True}]
+        self.assertIn("10:00", self._libres("Tratamiento facial", citas))
+        self.assertNotIn("10:00", self._libres("Sesión facial sin costo", citas))
+        self.assertNotIn("10:00", self._libres("Tratamiento corporal", citas))
+
     def test_con_costo_no_cuenta_como_gratis(self):
         r, _ = self._crear("Sesión corporal sin costo", [self._evento("Lupita Exp. Única CON COSTO - Facial")])
         self.assertTrue(r["ok"])
