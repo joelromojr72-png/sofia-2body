@@ -299,6 +299,20 @@ class UnaGratisALaVez(unittest.TestCase):
         self.assertIn("10:00", self._libres("Tratamiento corporal", [cita]))
 
 
+class CategoriaServicio(unittest.TestCase):
+    def test_lo_explicito_manda_sobre_palabras_sueltas(self):
+        casos = {
+            "Exp. Única - Corporal (abdomen, laterales, espalda)": "corporales",
+            "Tratamiento facial para manchas en espalda": "faciales",
+            "Masaje corporal relajante": "masajes",
+            "Masaje de espalda": "masajes",
+            "Depilación facial": "depilacion",
+        }
+        for texto, esperada in casos.items():
+            self.assertEqual(calendar_tool.categoria_servicio(texto), esperada, texto)
+            self.assertEqual(calendar_tool._calendario_para_servicio(texto), calendar_tool._CAL_POR_CLAVE[esperada], texto)
+
+
 class RelevoCortesia(unittest.IsolatedAsyncioTestCase):
     async def test_no_gasta_ia_en_cortesias(self):
         for t in ("Gracias", "Gracias, ya quedó", "Ok", "Si", "Sí 👍", "Confirmado", "Muchas gracias!!", "👍"):

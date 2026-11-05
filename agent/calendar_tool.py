@@ -129,9 +129,24 @@ def _calendario_venta() -> str:
     return _CAL_POR_CLAVE.get(_CAL_VENTA_KEY) or CALENDAR_ID
 
 
+def _servicio_explicito(t: str) -> str | None:
+    """
+    Si el texto ya nombra el servicio, eso manda sobre las palabras sueltas: 'Corporal (abdomen,
+    espalda)' es corporal, no masaje; 'Depilación facial' es depilación, no facial.
+    """
+    for palabra, clave in (("masaje", "masajes"), ("depil", "depilacion"),
+                           ("corporal", "corporales"), ("facial", "faciales")):
+        if palabra in t:
+            return clave
+    return None
+
+
 def _calendario_para_servicio(texto: str) -> str:
     """Devuelve el id del calendario que le toca a un servicio, por palabras clave."""
     t = (texto or "").lower()
+    explicito = _CAL_POR_CLAVE.get(_servicio_explicito(t) or "")
+    if explicito:
+        return explicito
     for clave, cal_id, kws in _SERVICE_CALENDARS:
         if clave == _CAL_VENTA_KEY:
             continue  # el de venta es el respaldo: se evalúa al final
@@ -153,6 +168,9 @@ _CATEGORIAS = ("masajes", "faciales", "depilacion", "corporales")
 def categoria_servicio(texto: str) -> str | None:
     """Categoría (masajes/faciales/depilacion/corporales) de un texto de servicio, o None."""
     t = (texto or "").lower()
+    explicito = _servicio_explicito(t)
+    if explicito:
+        return explicito
     for clave, _cal_id, kws in _SERVICE_CALENDARS:
         if clave in _CATEGORIAS and any(k in t for k in kws):
             return clave
