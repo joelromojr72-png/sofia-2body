@@ -119,6 +119,12 @@ HERRAMIENTAS = [
                     "description": "Duracion en minutos. La cita sin costo siempre dura 30. Si no "
                     "sabes, usa 60.",
                 },
+                "reemplaza_evento_id": {
+                    "type": "string",
+                    "description": "SOLO para REAGENDAR: el evento_id (de consultar_mis_citas) de la "
+                    "cita que se cambia. La vieja se quita sola hasta que la nueva quedó apartada; "
+                    "NO la canceles antes.",
+                },
             },
             "required": ["nombre", "servicio", "fecha_hora"],
         },
@@ -372,7 +378,15 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "Para CANCELAR: usa `consultar_mis_citas` para ver sus citas; si tiene una sola, "
             "confirma con ella que esa quiere cancelar y usa `cancelar_cita`; si tiene varias, "
             "pregúntele cuál. Nunca canceles sin confirmar. Los evento_id son internos: no se "
-            "los muestres. Para REAGENDAR: cancela la anterior y agenda la nueva.\n"
+            "los muestres.\n"
+            "Para REAGENDAR (cambiar su cita de día u hora): 1) `consultar_mis_citas`; 2) lee el chat: "
+            "si el equipo ya le movió o le confirmó algo, respeta eso y no lo cambies; 3) "
+            "`consultar_disponibilidad` del día nuevo con el mismo servicio; 4) cuando ella elija, "
+            "`agendar_cita` con `reemplaza_evento_id` = la cita vieja. NUNCA canceles primero para "
+            "luego agendar: la vieja se quita sola cuando la nueva ya quedó. Solo puedes mover o "
+            "cancelar citas que tú apartaste y siguen por confirmar; si la herramienta dice que es "
+            "del EQUIPO, no la toques: dile que le pasas su solicitud al equipo para que le "
+            "confirmen. Nunca le digas que ya quedó cambiada si la herramienta no lo confirmó.\n"
             "Si la clienta declina con amabilidad (dice que no por ahora) y ya te despediste "
             "dejando la puerta abierta, usa `cerrar_conversacion` para apagar su seguimiento; no "
             "le volveremos a escribir hasta que ella escriba."
@@ -450,6 +464,7 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                 inicio,
                 duracion,
                 args.get("notas", ""),
+                (args.get("reemplaza_evento_id") or "").strip(),
             )
             if res.get("ok"):
                 # Ya cerró: apagar el seguimiento y guardar sus datos.
@@ -474,13 +489,30 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                     "Confírmale a la clienta con calidez que ya apartaste su espacio y que "
                     "el equipo le confirma por aquí."
                 )
+            if res.get("equipo"):
+                return f"NO se movió nada: {res['error']}"
+            # Para no decir "sí hay" y luego "no hay": los huecos reales de ese día, ya con este servicio.
+            try:
+                libres = await asyncio.to_thread(
+                    calendar_tool.slots_libres, inicio.date(), duracion, 60, 6, servicio
+                )
+            except Exception:  # noqa: BLE001
+                libres = []
+            reales = (f" Horarios que SÍ están libres ese día para este servicio: {', '.join(libres)}."
+                      if libres else " Ese día ya no queda ningún horario libre para este servicio.")
             return (
-                f"NO se pudo agendar: {res.get('error', 'error desconocido')}. "
-                "Ofrécele otra hora o pasar con el equipo, sin alarmarla."
+                f"NO se pudo agendar: {res.get('error', 'error desconocido')}.{reales} "
+                "Ofrécele SOLO de esos (u otro día consultando de nuevo); no le vuelvas a ofrecer "
+                "la hora rechazada ni una que no esté en la lista, y no le des vueltas: una sola "
+                "disculpa breve y la alternativa."
             )
 
         if nombre == "consultar_mis_citas":
-            citas = await asyncio.to_thread(calendar_tool.buscar_citas_de, telefono or "")
+            try:
+                nombres = await memory.nombres_de(telefono or "")
+            except Exception:  # noqa: BLE001
+                nombres = []
+            citas = await asyncio.to_thread(calendar_tool.buscar_citas_de, telefono or "", 90, nombres)
             if not citas:
                 return (
                     "La clienta no tiene citas próximas registradas a su WhatsApp. "
@@ -488,6 +520,7 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                 )
             líneas = [
                 f"- evento_id={c['evento_id']} | {c['servicio']} | {c['cuando']}"
+                + ("" if c.get("de_sofia") else " | LA AGENDÓ O CONFIRMÓ EL EQUIPO: no la canceles ni la muevas")
                 for c in citas
             ]
             return (
@@ -506,6 +539,8 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                     "Confírmale con calidez que su cita quedó cancelada y ofrécele reagendar "
                     "cuando quiera."
                 )
+            if res.get("equipo"):
+                return f"NO se canceló nada: {res['error']}"
             return (
                 f"NO se pudo cancelar: {res.get('error', 'error desconocido')}. "
                 "Discúlpate con calidez y ofrece pasar con el equipo."

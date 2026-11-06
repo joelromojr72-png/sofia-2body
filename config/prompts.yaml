@@ -356,19 +356,33 @@ promociones:
       - '\$\s?705\b'
       - '30\s?%\s?\+\s?30'
       - 'hasta el 31'
-  - nombre: "EMSculpt noviembre"
+  - nombre: "Promociones de noviembre"
     desde: 2026-11-01
     hasta: 2026-11-30
     contenido: |
-      PROMO NOVIEMBRE EMSCULPT (energía electromagnética de alta densidad), del 1 al 30 de
-      noviembre de 2026: 3 sesiones $5,040 · 6 sesiones $8,600 (unos $1,433 por sesión).
-      Condiciones (dilas con ligereza): aplican restricciones, no aplica con otras promociones,
-      previa valoración. Su primera sesión es sin costo y ahí la especialista le confirma
-      cuántas sesiones necesita. Si pregunta por meses sin intereses, dile que el equipo le
-      confirma las opciones.
+      PROMOCIONES DE NOVIEMBRE 2026 (pósters oficiales, del 1 al 30 de noviembre). Condiciones
+      (dilas con ligereza): aplican restricciones, no aplica con otras promociones, previa valoración.
+      - EMSCULPT (energía electromagnética de alta densidad): 3 sesiones $5,040 · 6 sesiones
+        $8,600 (unos $1,433 por sesión).
+      - ENDOSPHERE: 3 sesiones $5,040 · 6 sesiones $8,600.
+      - PROMO CORPORAL · MOLDEAMIENTO CORPORAL: 12 sesiones $5,900.
+      - PROMO DEPILACIÓN · CUATRIDIODO: 8 sesiones en patilla, entrecejo, piernas, brazos, axila
+        y bikini — $8,445 (son esas 6 zonas juntas).
+      - PROMO SPA · MASAJES RELAJANTES: 4 masajes relajantes $2,300.
+      - PROMO GENERAL: 40% + 20% de descuento en todos los tratamientos que no están arriba
+        (descuentos encadenados: paga aprox. el 48% del precio de lista); el monto exacto se lo
+        confirma la especialista en su valoración.
+      Su primera sesión (Experiencia Única) sigue siendo sin costo, y ahí la especialista le
+      confirma cuántas sesiones necesita. Si pregunta por meses sin intereses, dile que el equipo
+      le confirma las opciones. Del 13 al 17 de noviembre también corre el Buen Fin (abajo): si
+      pregunta en esas fechas, dale la que le convenga más; no se juntan.
     frases_vencida:
       - '(?<![\d,])5,?040\b'
       - '(?<![\d,])8,?600\b'
+      - '(?<![\d,])5,?900\b'
+      - '(?<![\d,])8,?445\b'
+      - '(?<![\d,])2,?300\b'
+      - '40\s?%\s?\+\s?20'
   - nombre: "Buen Fin"
     desde: 2026-11-13
     hasta: 2026-11-17

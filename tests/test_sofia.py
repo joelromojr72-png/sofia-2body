@@ -88,7 +88,8 @@ class Promos(unittest.TestCase):
         self.assertNotIn("6,500", b)
         self.assertNotIn("5,999", b)
         self.assertIn("YA TERMINARON", b)
-        self.assertIn("EMSculpt noviembre — VIGENTE", b)
+        self.assertIn("Promociones de noviembre — VIGENTE", b)
+        self.assertIn("8,445", b)
 
     def test_emsculpt_noviembre_vence_el_30(self):
         self.assertIn("8,600", self.bloque(2026, 11, 30, 19, 0))
@@ -611,3 +612,105 @@ class Webhook(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CitasDelEquipo(unittest.TestCase):
+    """Sofía solo cancela o mueve citas que ella apartó y siguen por confirmar."""
+
+    TEL = "5217719999999"
+
+    def _ev(self, titulo, desc, id_="v1", hora=10, dia="2030-01-07"):
+        return {"id": id_, "summary": titulo, "description": desc, "status": "tentative",
+                "created": "2030-01-01T00:00:00.000Z",
+                "start": {"dateTime": f"{dia}T{hora:02d}:00:00-06:00"},
+                "end": {"dateTime": f"{dia}T{hora:02d}:30:00-06:00"}}
+
+    def _sofia(self, **k):
+        return self._ev("Cita (por confirmar) - Sesión facial sin costo - Ana Ruiz",
+                        f"Solicitud tomada por Sofía (bot de WhatsApp).\nWhatsApp: +{self.TEL}", **k)
+
+    def _equipo(self, **k):
+        return self._ev("Ana Ruiz facial", f"Tel {self.TEL}", **k)
+
+    def _cancelar(self, ev):
+        svc = MagicMock()
+        svc.events.return_value.get.return_value.execute.return_value = ev
+        with patch.object(calendar_tool, "_obtener_servicio", lambda: svc):
+            return calendar_tool.cancelar_cita("cal|" + ev["id"], self.TEL), svc
+
+    def test_no_cancela_cita_del_equipo(self):
+        r, svc = self._cancelar(self._equipo())
+        self.assertFalse(r["ok"]); self.assertTrue(r.get("equipo"))
+        svc.events.return_value.delete.assert_not_called()
+
+    def test_no_cancela_la_que_el_equipo_ya_confirmo(self):
+        ev = self._sofia(); ev["summary"] = "CONFIRMADA - Ana Ruiz facial"
+        r, svc = self._cancelar(ev)
+        self.assertFalse(r["ok"]); svc.events.return_value.delete.assert_not_called()
+
+    def test_si_cancela_la_suya(self):
+        r, svc = self._cancelar(self._sofia())
+        self.assertTrue(r["ok"]); svc.events.return_value.delete.assert_called_once()
+
+    def test_sin_telefono_no_cancela(self):
+        svc = MagicMock()
+        svc.events.return_value.get.return_value.execute.return_value = self._sofia()
+        with patch.object(calendar_tool, "_obtener_servicio", lambda: svc):
+            r = calendar_tool.cancelar_cita("cal|v1", "")
+        self.assertFalse(r["ok"])
+
+    def _reagendar(self, vieja, dia_vieja_mismo=False):
+        svc = MagicMock()
+        svc.events.return_value.get.return_value.execute.return_value = vieja
+        svc.events.return_value.insert.return_value.execute.return_value = {"id": "nueva", "created": "2030-01-02T00:00:00.000Z"}
+        dia = [("cal", vieja)] if dia_vieja_mismo else []
+        with patch.object(calendar_tool, "_obtener_servicio", lambda: svc), \
+             patch.object(calendar_tool, "sesion_gratis_previa", lambda *a, **k: None), \
+             patch.object(calendar_tool, "_eventos_dia_todos", side_effect=[dia, dia]):
+            r = calendar_tool.crear_cita("Ana Ruiz", self.TEL, "Sesión facial sin costo",
+                                         _dt(2030, 1, 7, 12, 0, tzinfo=calendar_tool.TZ), 30, "", "cal|v1")
+        return r, svc
+
+    def test_reagenda_borra_la_vieja_despues_de_crear(self):
+        r, svc = self._reagendar(self._sofia(), dia_vieja_mismo=True)
+        self.assertTrue(r["ok"], r)
+        svc.events.return_value.insert.assert_called_once()
+        svc.events.return_value.delete.assert_called_once()
+        self.assertEqual(svc.events.return_value.delete.call_args.kwargs["eventId"], "v1")
+
+    def test_reagenda_no_mueve_cita_del_equipo(self):
+        r, svc = self._reagendar(self._equipo())
+        self.assertFalse(r["ok"]); self.assertTrue(r.get("equipo"))
+        svc.events.return_value.insert.assert_not_called()
+        svc.events.return_value.delete.assert_not_called()
+
+    def test_si_la_nueva_falla_la_vieja_queda(self):
+        vieja = self._sofia()
+        ocupada = ("cal2", self._ev("Lupita facial", "Tel 5217711111111", id_="otra", hora=12))
+        svc = MagicMock()
+        svc.events.return_value.get.return_value.execute.return_value = vieja
+        with patch.object(calendar_tool, "_obtener_servicio", lambda: svc), \
+             patch.object(calendar_tool, "sesion_gratis_previa", lambda *a, **k: None), \
+             patch.object(calendar_tool, "_eventos_dia_todos", side_effect=[[ocupada], [ocupada]]):
+            r = calendar_tool.crear_cita("Ana Ruiz", self.TEL, "Tratamiento facial",
+                                         _dt(2030, 1, 7, 12, 0, tzinfo=calendar_tool.TZ), 60, "", "cal|v1")
+        self.assertFalse(r["ok"])
+        svc.events.return_value.delete.assert_not_called()
+
+    def test_ve_citas_del_equipo_por_nombre(self):
+        ev = self._ev("Ana Ruiz facial", "apuntada a mano", dia="2030-01-08")
+        with patch.object(calendar_tool, "_obtener_servicio", lambda: MagicMock()), \
+             patch.object(calendar_tool, "_calendarios_disponibilidad", lambda: ["cal"]), \
+             patch.object(calendar_tool, "_listar_eventos", lambda *a, **k: [ev]), \
+             patch.object(calendar_tool, "datetime", RelojFijo2030):
+            sin = calendar_tool.buscar_citas_de(self.TEL)
+            con = calendar_tool.buscar_citas_de(self.TEL, 90, ["Ana Ruiz"])
+        self.assertEqual(sin, [])
+        self.assertEqual(len(con), 1); self.assertFalse(con[0]["de_sofia"])
+
+
+class RelojFijo2030(_dt):
+    @classmethod
+    def now(cls, tz=None):
+        d = _dt(2030, 1, 6, 9, 0)
+        return d.replace(tzinfo=tz) if tz else d

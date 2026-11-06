@@ -803,6 +803,14 @@ async def directorio_clientes() -> list[tuple[str, str]]:
     return out
 
 
+async def nombres_de(telefono: str) -> list[str]:
+    """Nombres con que conocemos a este teléfono (directorio de Anegocios y lead de WhatsApp)."""
+    tel10 = "".join(c for c in (telefono or "") if c.isdigit())[-10:]
+    if len(tel10) < 10:
+        return []
+    return list({n for n, t in await directorio_clientes() if t == tel10 and n})
+
+
 async def estado_lead(telefono_10: str) -> str | None:
     """Estado del lead por los últimos 10 dígitos (p. ej. 'opt_out'), o None si no existe."""
     async with async_session() as s:

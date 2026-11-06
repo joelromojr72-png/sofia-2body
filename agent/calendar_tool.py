@@ -271,7 +271,8 @@ def _es_cita_gratis(ev: dict) -> bool:
 
 
 def sesion_gratis_previa(telefono: str, nombre: str = "", ignorar_dia: date | None = None,
-                         dias_atras: int = 365, dias_adelante: int = 120) -> dict | None:
+                         dias_atras: int = 365, dias_adelante: int = 120,
+                         ignorar_evento: str = "") -> dict | None:
     """
     ¿Esta clienta ya tuvo (o ya tiene apartada) su sesión sin costo? Busca en TODOS los
     calendarios citas gratis/Exp. Única/valoración con su teléfono, o con su nombre y
@@ -287,7 +288,7 @@ def sesion_gratis_previa(telefono: str, nombre: str = "", ignorar_dia: date | No
     ini, fin = ahora - timedelta(days=dias_atras), ahora + timedelta(days=dias_adelante)
     for cal_id in _calendarios_disponibilidad():
         for ev in _listar_eventos(svc, cal_id, ini.isoformat(), fin.isoformat()):
-            if ev.get("status") == "cancelled":
+            if ev.get("status") == "cancelled" or (ignorar_evento and ev.get("id") == ignorar_evento):
                 continue
             titulo, desc = ev.get("summary", "") or "", ev.get("description", "") or ""
             if "cancel" in titulo.lower() or not _ES_GRATIS.search(titulo + " " + desc):
@@ -317,6 +318,17 @@ def _calendarios_disponibilidad() -> list[str]:
     if CALENDAR_ID and CALENDAR_ID not in ids:
         ids.append(CALENDAR_ID)  # por si el equipo apunta algo en el principal
     return ids
+
+
+def es_cita_de_sofia(ev: dict) -> bool:
+    """
+    ¿Esta cita la apartó Sofía y el equipo todavía no la toca? Solo esas puede cancelar o mover.
+    Las que apunta el equipo, o las de Sofía que el equipo ya confirmó (cambió el título y le
+    quitó el "por confirmar"), son del equipo: Sofía no las borra ni las mueve.
+    """
+    desc = ev.get("description", "") or ""
+    return ("Solicitud tomada por Sofía" in desc or "bot de WhatsApp" in desc) and \
+        "por confirmar" in (ev.get("summary", "") or "").lower()
 
 
 def _componer_evento_id(cal_id: str, ev_id: str) -> str:
@@ -642,10 +654,15 @@ def crear_cita(
     inicio: datetime,
     duracion_min: int = 60,
     notas: str = "",
+    reemplaza: str = "",
 ) -> dict:
     """
     Crea la cita (marcada 'por confirmar') en el calendario del SERVICIO que corresponde.
     Antes revisa disponibilidad en TODOS los calendarios para no encimar.
+
+    `reemplaza` (evento_id de consultar_mis_citas) = REAGENDA: la cita vieja no cuenta como
+    ocupada ni como "ya tuvo su gratis", y solo se borra DESPUÉS de que la nueva quedó
+    guardada. Si algo falla, la vieja sigue intacta. Solo se reagendan citas de Sofía.
 
     Retorna {"ok": True, "cuando": "...", "link": "..."} o {"ok": False, "error": "..."}.
     """
@@ -687,10 +704,23 @@ def crear_cita(
     tel_digits = "".join(c for c in tel if c.isdigit())
     cal_destino = _calendario_para_servicio(servicio)
 
+    vieja_cal, vieja_id = _partir_evento_id(reemplaza) if reemplaza else ("", "")
+    if reemplaza:
+        try:
+            vieja = svc.events().get(calendarId=vieja_cal, eventId=vieja_id).execute()
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "error": "No encontré la cita que quiere cambiar; revisa con consultar_mis_citas."}
+        if tel_digits not in "".join(c for c in vieja.get("description", "") if c.isdigit()):
+            return {"ok": False, "error": "Esa cita no está a nombre de esta clienta; no la muevas."}
+        if not es_cita_de_sofia(vieja):
+            return {"ok": False, "equipo": True, "error": (
+                "Esa cita la agendó o ya la confirmó el EQUIPO: tú no la mueves ni la cancelas. "
+                "Dile a la clienta que le pasas su solicitud al equipo para que le confirme el cambio.")}
+
     # ── Una sola sesión sin costo por clienta (facial O corporal) ────────
     if es_sesion_gratis(servicio):
         try:
-            previa = sesion_gratis_previa(tel_digits, nombre, ignorar_dia=inicio.date())
+            previa = sesion_gratis_previa(tel_digits, nombre, ignorar_dia=inicio.date(), ignorar_evento=vieja_id)
         except Exception as e:  # noqa: BLE001
             logger.error(f"No se pudo revisar si ya tuvo sesión gratis: {e}")
             previa = None
@@ -699,9 +729,9 @@ def crear_cita(
             if previa["futura"]:
                 return {"ok": False, "error": (
                     f"Esta clienta YA tiene apartada su sesión sin costo ({previa['cuando']}). "
-                    "Solo se regala UNA por persona (facial o corporal). Si quiere cambiarla, "
-                    "cancela esa con cancelar_cita y agenda la nueva; si quiere otro servicio "
-                    "además, ese ya va con su precio.")}
+                    "Solo se regala UNA por persona (facial o corporal). Si quiere cambiarla de día u "
+                    "hora, usa agendar_cita con reemplaza_evento_id (de consultar_mis_citas), sin "
+                    "cancelar antes; si quiere otro servicio además, ese ya va con su precio.")}
             return {"ok": False, "error": (
                 f"Esta clienta YA tuvo su sesión sin costo ({previa['cuando']}). Solo se regala "
                 "UNA por persona (facial o corporal). No la agendes gratis: ofrécele con calidez "
@@ -713,7 +743,8 @@ def crear_cita(
     #   • Traslape de OTRA clienta del MISMO servicio (o de servicio desconocido) → ocupado.
     #   • Traslape de OTRA clienta con sesión sin costo, si esta también lo es → ocupado.
     #   • Traslape de OTRA clienta de OTRO servicio → se empalma sin problema.
-    existentes = list(_eventos_dia_todos(svc, inicio.date()))  # [(cal_id, evento), ...]
+    existentes = [(c, e) for c, e in _eventos_dia_todos(svc, inicio.date())  # [(cal_id, evento), ...]
+                  if not (vieja_id and e.get("id") == vieja_id)]
     cat_nueva = categoria_servicio(servicio)
     nueva_gratis = es_sesion_gratis(servicio) and _una_gratis_por_hora(inicio.date())
     simultaneas = 0  # citas de OTRAS clientas a esa hora (tope MAX_CITAS_SIMULTANEAS)
@@ -791,7 +822,7 @@ def crear_cita(
         if cal_id != cal_destino or not ev_x.get("start", {}).get("dateTime"):
             continue
         desc_x = ev_x.get("description", "")
-        if "Sofía" not in desc_x and "bot de WhatsApp" not in desc_x:
+        if reemplaza or not es_cita_de_sofia(ev_x):
             continue
         if tel_digits and tel_digits in "".join(c for c in desc_x if c.isdigit()):
             mismos.append((cal_id, ev_x))
@@ -864,6 +895,14 @@ def crear_cita(
     except Exception as e:  # noqa: BLE001
         logger.error(f"No se pudo re-verificar traslape post-insert: {e}")
 
+    if reemplaza:
+        # La nueva ya quedó guardada: hasta ahora se quita la vieja.
+        try:
+            svc.events().delete(calendarId=vieja_cal, eventId=vieja_id).execute()
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Reagenda: la nueva quedó pero no se pudo quitar la vieja ({vieja_cal}/{vieja_id}): {e}")
+        logger.info(f"Cita reagendada: {vieja_id} → {inicio.isoformat()}")
+
     dia_txt = _DIAS[inicio.weekday()]
     cuando = f"{dia_txt} {inicio.day} a las {inicio.strftime('%H:%M')}"
     logger.info(f"Cita creada en {cal_destino}: {cuerpo['summary']} @ {inicio.isoformat()}")
@@ -899,11 +938,12 @@ def telefonos_con_cita(dias_atras: int = 1, dias_adelante: int = 60) -> set[str]
     return tels
 
 
-def buscar_citas_de(telefono: str, dias_adelante: int = 90) -> list[dict]:
+def buscar_citas_de(telefono: str, dias_adelante: int = 90, nombres: list[str] | None = None) -> list[dict]:
     """
-    Próximas citas de UNA clienta (por su WhatsApp), en TODOS los calendarios, para
-    cancelar/reagendar. Cada item: {"evento_id", "cuando", "servicio", "titulo"}.
-    El evento_id incluye el calendario (para poder cancelarlo después).
+    Próximas citas de UNA clienta, en TODOS los calendarios: por su WhatsApp, o por su nombre y
+    apellido en el título (las que apunta el equipo a mano). Cada item: {"evento_id", "cuando",
+    "servicio", "titulo", "de_sofia"}. El evento_id incluye el calendario. `de_sofia` = False:
+    la puso o la confirmó el equipo y Sofía no la toca.
     """
     svc = _obtener_servicio()
     if not svc:
@@ -913,14 +953,17 @@ def buscar_citas_de(telefono: str, dias_adelante: int = 90) -> list[dict]:
         return []
     ahora = datetime.now(TZ)
     fin = ahora + timedelta(days=dias_adelante)
+    toks_nombres = [_tokens(n) for n in (nombres or []) if n]
 
     citas = []
     for cal_id in _calendarios_disponibilidad():
         for ev in _listar_eventos(svc, cal_id, ahora.isoformat(), fin.isoformat()):
             if ev.get("status") == "cancelled":
                 continue
-            desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
-            if tel_digits not in desc_digits:
+            desc_digits = "".join(c for c in ev.get("summary", "") + ev.get("description", "") if c.isdigit())
+            toks_titulo = _tokens(ev.get("summary", ""))
+            por_nombre = any(len(t) >= 2 and t <= toks_titulo for t in toks_nombres)
+            if tel_digits[-10:] not in desc_digits and not por_nombre:
                 continue
             ini = ev.get("start", {}).get("dateTime")
             if not ini:
@@ -937,6 +980,7 @@ def buscar_citas_de(telefono: str, dias_adelante: int = 90) -> list[dict]:
                     "cuando": f"{_DIAS[di.weekday()]} {di.day} a las {di.strftime('%H:%M')}",
                     "servicio": servicio,
                     "titulo": ev.get("summary", ""),
+                    "de_sofia": es_cita_de_sofia(ev),
                     "_inicio": di,
                 }
             )
@@ -971,8 +1015,13 @@ def cancelar_cita(evento_id: str, telefono: str) -> dict:
 
     tel_digits = "".join(c for c in (telefono or "") if c.isdigit())
     desc_digits = "".join(c for c in ev.get("description", "") if c.isdigit())
-    if tel_digits and tel_digits not in desc_digits:
+    if not tel_digits or tel_digits not in desc_digits:
         return {"ok": False, "error": "Esa cita no está a tu nombre; no puedo cancelarla."}
+    if not es_cita_de_sofia(ev):
+        logger.info(f"Cancelación bloqueada: la cita es del equipo ({cal_id}/{ev_id})")
+        return {"ok": False, "equipo": True, "error": (
+            "Esa cita la agendó o ya la confirmó el EQUIPO: tú no la cancelas ni la mueves. "
+            "Dile a la clienta que le pasas su solicitud al equipo para que ellas se lo confirmen.")}
 
     ini = ev.get("start", {}).get("dateTime")
     cuando = ""

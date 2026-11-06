@@ -416,7 +416,7 @@ async def _ciclo_relevo(proveedor) -> int:
     if not leads:
         return 0
     enviados = 0
-    silencio = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "120")
+    silencio = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "720")
     for l in leads:
         tel, inbound = l["telefono"], l["last_inbound"]
         if await memory.equipo_activo_reciente(tel, silencio):

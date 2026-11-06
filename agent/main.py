@@ -96,7 +96,7 @@ def mensaje_es_viejo(msg: MensajeEntrante) -> bool:
 # ── Protecciones extra ──────────────────────────────────────────────────────
 # Si una persona del equipo le escribió a la clienta hace menos de esto, Sofía NO contesta:
 # la charla la lleva el equipo en vivo (p. ej. alguien sigue atendiendo a las 8:05 pm).
-SILENCIO_TRAS_EQUIPO_MIN = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "120")
+SILENCIO_TRAS_EQUIPO_MIN = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "720")
 
 # Tope de respuestas de Sofía por clienta por hora: corta bucles (otro bot contestándole a
 # Sofía) y abusos que gastarían saldo de Anthropic. Pasado el tope, se calla y lo ve el equipo.
