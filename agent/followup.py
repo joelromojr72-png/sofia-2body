@@ -612,25 +612,27 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
                 # Pausa global para pruebas: no se manda ningún seguimiento/confirmación.
                 await asyncio.sleep(intervalo_seg)
                 continue
+            # Cada paso va aislado: si uno truena, los demás (p. ej. los recordatorios de cita)
+            # siguen corriendo en esta misma vuelta.
+            pasos = []
             if habilitado():
-                # 0) Relevo: quien escribió en horario del equipo y nadie le contestó.
                 if _en_horario_relevo():
-                    await _ciclo_relevo(proveedor)
-                # 1) Toque de cierre dentro de 24 h (mensaje libre, no necesita plantilla).
+                    pasos.append(("relevo", _ciclo_relevo))  # 0) escribió en horario del equipo y nadie contestó
                 if _en_horario_nudge():
-                    await _ciclo_nudge(proveedor)
-                # 2) Seguimiento multi-día por plantilla aprobada (fuera de 24 h).
+                    pasos.append(("toque de cierre", _ciclo_nudge))  # 1) dentro de 24 h, mensaje libre
                 if _en_horario():
-                    await _ciclo(proveedor)
-                # 2b) Recordatorio ligero en charlas del equipo (clienta no contestó en 3 h).
+                    pasos.append(("seguimiento", _ciclo))  # 2) multi-día por plantilla
                 if _en_horario_nudge_equipo():
-                    await _ciclo_nudge_equipo(proveedor)
-            # 3) Recordatorio del día antes a todas las citas de mañana (plantilla).
+                    pasos.append(("recordatorio al equipo", _ciclo_nudge_equipo))  # 2b) no contestó al equipo en 3 h
             if _confirm_habilitado() and _debe_confirmar_ahora():
-                await _ciclo_confirmaciones(proveedor)
-            # 4) Recordatorio el mismo día (2-3 h antes) a primeras visitas.
+                pasos.append(("confirmaciones", _ciclo_confirmaciones))  # 3) día antes
             if _confirm_habilitado():
-                await _ciclo_recordatorio_hoy(proveedor)
+                pasos.append(("recordatorio de hoy", _ciclo_recordatorio_hoy))  # 4) mismo día
+            for nombre, paso in pasos:
+                try:
+                    await paso(proveedor)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception(f"Error en el ciclo de seguimiento ({nombre}): {e}")
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error en el ciclo de seguimiento: {e}")
         await asyncio.sleep(intervalo_seg)
