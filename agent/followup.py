@@ -428,11 +428,15 @@ async def _ciclo_relevo(proveedor) -> int:
     if not leads:
         return 0
     enviados = 0
-    silencio = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "720")
+    from agent.consola import chat_pausado
+    from agent.main import SILENCIO_TRAS_EQUIPO_MIN as silencio
+
     for l in leads:
         tel, inbound = l["telefono"], l["last_inbound"]
         if await memory.equipo_activo_reciente(tel, silencio):
             continue  # el equipo sigue en esa charla: se revisa en el próximo ciclo
+        if await chat_pausado(tel):
+            continue  # el equipo apagó a Sofía en este chat desde la consola
         clave = f"relevo:{tel}:{inbound}"
         if not await memory.marcar_evento_procesado(clave):
             continue

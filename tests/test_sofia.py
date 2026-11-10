@@ -926,6 +926,48 @@ class Consola(Base):
         await self.cli.post("/console/pausa", json={"tel": TEL, "pausar": False}, headers=self.h)
         self.assertFalse(await consola.chat_pausado(TEL))
 
+    def test_pausa_cubre_un_turno_y_se_vence_al_volver_el_equipo(self):
+        from zoneinfo import ZoneInfo
+        from agent.consola import pausa_vence
+        mx = ZoneInfo("America/Mexico_City")
+        casos = [
+            (_dt(2026, 11, 9, 15, 7, tzinfo=mx), _dt(2026, 11, 10, 9, 0, tzinfo=mx)),   # lun tarde → mar 9:00
+            (_dt(2026, 11, 13, 21, 0, tzinfo=mx), _dt(2026, 11, 14, 9, 0, tzinfo=mx)),  # vie noche → sáb 9:00
+            (_dt(2026, 11, 14, 16, 0, tzinfo=mx), _dt(2026, 11, 16, 9, 0, tzinfo=mx)),  # sáb tarde → lun 9:00
+        ]
+        for desde, esperado in casos:
+            self.assertEqual(pausa_vence(desde), esperado, desde)
+
+    async def test_pausa_vieja_ya_no_calla_a_sofia(self):
+        from datetime import timedelta
+        from agent import consola
+        async with memory.async_session() as s:
+            s.add(consola.ChatPausa(telefono=TEL, por="consola", desde=memory.ahora() - timedelta(days=9)))
+            await s.commit()
+        self.assertFalse(await consola.chat_pausado(TEL))
+        async with memory.async_session() as s:
+            self.assertIsNone(await s.get(consola.ChatPausa, TEL))
+
+    async def test_si_el_equipo_entra_mientras_sofia_piensa_no_se_encima(self):
+        from agent.providers.base import MensajeEntrante
+        prov = MagicMock()
+        prov.enviar_mensaje = AsyncMock(return_value=True)
+
+        async def lenta(*a, **kw):
+            await memory.registrar_outbound_equipo(TEL)  # el equipo contesta en medio
+            return ("Hola, ¿le aparto mañana?", True)
+
+        msg = MensajeEntrante(telefono=TEL, texto="hola", mensaje_id="m-encima", es_propio=False, contexto={})
+        with patch.object(main, "generar_respuesta", side_effect=lenta):
+            await main.procesar_mensaje(msg, prov)
+        prov.enviar_mensaje.assert_not_awaited()
+        hist = await memory.obtener_historial_equipo(TEL)
+        self.assertEqual(hist[-1]["content"], "hola")
+
+    def test_silencio_tras_equipo_es_corto(self):
+        # 12 h dejaba a Sofía callada toda la noche si el equipo contestaba a las 7 pm.
+        self.assertLessEqual(main.SILENCIO_TRAS_EQUIPO_MIN, 60)
+
     async def test_cors_de_la_consola(self):
         r = await self.cli.options("/console/chats", headers={
             "Origin": "https://apex-console-two.vercel.app", "Access-Control-Request-Method": "GET",

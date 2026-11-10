@@ -98,7 +98,9 @@ def mensaje_es_viejo(msg: MensajeEntrante) -> bool:
 # ── Protecciones extra ──────────────────────────────────────────────────────
 # Si una persona del equipo le escribió a la clienta hace menos de esto, Sofía NO contesta:
 # la charla la lleva el equipo en vivo (p. ej. alguien sigue atendiendo a las 8:05 pm).
-SILENCIO_TRAS_EQUIPO_MIN = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "720")
+# OJO: corto a propósito. Antes eran 12 h y, si el equipo contestaba a las 7 pm (desde el cel o
+# la consola), Sofía se quedaba callada TODA la noche en ese chat, que es justo su turno.
+SILENCIO_TRAS_EQUIPO_MIN = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "45")
 
 # Tope de respuestas de Sofía por clienta por hora: corta bucles (otro bot contestándole a
 # Sofía) y abusos que gastarían saldo de Anthropic. Pasado el tope, se calla y lo ve el equipo.
@@ -722,6 +724,14 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
                 # Se guarda lo que escribió, para no perderlo: el equipo y el relevo lo ven.
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 logger.warning(f"Sofía no pudo generar respuesta para {msg.telefono}; no se envía nada (lo atiende el equipo)")
+                return
+
+            # Re-chequeo JUSTO antes de enviar: mientras Sofía pensaba (10-30 s con agenda), una
+            # persona del equipo pudo contestar desde el cel o la consola, o apagarla en este chat.
+            # Si pasó, NO se manda nada (se encimaría con el equipo); solo se guarda lo de la clienta.
+            if await equipo_activo_reciente(msg.telefono, SILENCIO_TRAS_EQUIPO_MIN) or await chat_pausado(msg.telefono):
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                logger.info(f"[equipo entró mientras Sofía pensaba] no se envía su respuesta: {msg.telefono}")
                 return
 
             enviado = await prov.enviar_mensaje(msg.telefono, respuesta, msg.contexto)

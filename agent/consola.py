@@ -14,7 +14,7 @@ Todo pide el encabezado `X-Console-Key` = variable CONSOLE_KEY (no es la ADMIN_K
 import asyncio
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import String, func, select
@@ -37,10 +37,45 @@ class ChatPausa(Base):
     desde: Mapped[datetime] = mapped_column(default=ahora)
 
 
+def pausa_vence(desde: datetime) -> datetime:
+    """
+    Hasta cuándo dura un "apagar a Sofía en este chat": cubre el SIGUIENTE turno de Sofía y se
+    vence solo cuando vuelve el equipo. Así nunca se queda apagada para siempre en un chat y
+    Sofía sigue cubriendo su horario de siempre (noches, sábado tarde, domingo) al día siguiente.
+    """
+    from datetime import timedelta
+
+    from agent.main import TZ_NEGOCIO, sofia_debe_responder
+
+    t = desde.astimezone(TZ_NEGOCIO) if desde.tzinfo else desde.replace(tzinfo=timezone.utc).astimezone(TZ_NEGOCIO)
+    t = t.replace(second=0, microsecond=0)
+    vio_turno_sofia = False
+    for _ in range(8 * 24 * 4):  # pasos de 15 min, máx. 8 días
+        t += timedelta(minutes=15)
+        if sofia_debe_responder(t):
+            vio_turno_sofia = True
+        elif vio_turno_sofia:
+            return t.replace(minute=(t.minute // 15) * 15)
+    return t
+
+
+def _vigente(p: "ChatPausa | None") -> bool:
+    if p is None:
+        return False
+    desde = p.desde if p.desde.tzinfo else p.desde.replace(tzinfo=timezone.utc)
+    return ahora() < pausa_vence(desde)
+
+
 async def chat_pausado(telefono: str) -> bool:
     try:
         async with async_session() as s:
-            return (await s.get(ChatPausa, telefono)) is not None
+            p = await s.get(ChatPausa, telefono)
+            if p is not None and not _vigente(p):
+                await s.delete(p)  # ya volvió el equipo: la pausa se vence sola
+                await s.commit()
+                logger.info(f"Consola: pausa vencida en …{telefono[-4:]}, Sofía vuelve a su horario")
+                return False
+            return p is not None
     except Exception:  # noqa: BLE001  (si la tabla falla, Sofía sigue como siempre)
         return False
 
@@ -103,7 +138,8 @@ async def chats(limite: int = 150, x_console_key: str | None = Header(default=No
         )).all()
         tels = [m.telefono for m, _ in filas]
         leads = {l.telefono: l for l in (await s.execute(select(Lead).where(Lead.telefono.in_(tels)))).scalars()}
-        pausas = {p.telefono for p in (await s.execute(select(ChatPausa).where(ChatPausa.telefono.in_(tels)))).scalars()}
+        pausas = {p.telefono for p in (await s.execute(select(ChatPausa).where(ChatPausa.telefono.in_(tels)))).scalars()
+                  if _vigente(p)}
         origenes: dict[str, str] = {}
         for o in (await s.execute(
             select(OrigenAnuncio).where(OrigenAnuncio.telefono.in_(tels)).order_by(OrigenAnuncio.creado_en)
@@ -154,7 +190,9 @@ async def chat(tel: str, desde_id: int = 0, x_console_key: str | None = Header(d
         "tel": tel,
         "canal": "messenger" if tel.startswith("msgr:") else "whatsapp",
         "mensajes": items,
-        "sofia_pausada": pausa is not None,
+        "sofia_pausada": _vigente(pausa),
+        "pausa_hasta": _iso(pausa_vence(pausa.desde if pausa.desde.tzinfo else pausa.desde.replace(tzinfo=timezone.utc)))
+        if _vigente(pausa) else None,
         "lead": {
             "nombre": lead.nombre, "interes": lead.interes, "estado": lead.estado,
             "creado": _iso(lead.creado_en), "equipo_en": _iso(lead.ultimo_equipo_en),
@@ -227,8 +265,12 @@ async def pausa(request: Request, x_console_key: str | None = Header(default=Non
     pausar = bool(datos.get("pausar"))
     async with async_session() as s:
         actual = await s.get(ChatPausa, tel)
+        if pausar and actual is not None and not _vigente(actual):
+            await s.delete(actual)  # pausa vieja ya vencida: se reemplaza por una nueva
+            await s.flush()
+            actual = None
         if pausar and actual is None:
-            s.add(ChatPausa(telefono=tel, por=(datos.get("por") or "consola")[:60]))
+            s.add(ChatPausa(telefono=tel, por=(datos.get("por") or "consola")[:60], desde=ahora()))
         elif not pausar and actual is not None:
             await s.delete(actual)
         await s.commit()
@@ -238,4 +280,4 @@ async def pausa(request: Request, x_console_key: str | None = Header(default=Non
         except Exception:  # noqa: BLE001
             pass
     logger.info(f"Consola: Sofía {'PAUSADA' if pausar else 'reactivada'} en …{tel[-4:]}")
-    return {"ok": True, "sofia_pausada": pausar}
+    return {"ok": True, "sofia_pausada": pausar, "pausa_hasta": _iso(pausa_vence(ahora())) if pausar else None}
