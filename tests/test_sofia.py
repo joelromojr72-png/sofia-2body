@@ -138,6 +138,22 @@ class Resp:
         self.usage = Bloque("u", input_tokens=1, output_tokens=1, cache_read_input_tokens=0)
 
 
+class GeneradoresProactivos(unittest.IsolatedAsyncioTestCase):
+    """Seguimiento, recordatorio al equipo y relevo NO deben tronar (11-nov: un NameError los apagó)."""
+
+    async def test_todos_generan_texto(self):
+        from datetime import datetime as _d, timezone as _z
+        hist = [{"role": "user", "content": "Hola, info del facial", "ts": _d(2026, 11, 1, tzinfo=_z.utc)},
+                {"role": "assistant", "content": "[Equipo] ¿Le aparto el jueves a las 4?", "ts": _d(2026, 11, 1, tzinfo=_z.utc)}]
+        crear = AsyncMock(return_value=Resp([Bloque("text", text="¿Seguimos con su cita del jueves? 💜")]))
+        with patch.object(brain.client.messages, "create", crear):
+            self.assertTrue(await brain.generar_seguimiento(hist))
+            self.assertTrue(await brain.generar_recordatorio_equipo(hist))
+            hist2 = hist + [{"role": "user", "content": "¿Y cuánto cuesta el corporal?", "ts": _d(2026, 11, 1, tzinfo=_z.utc)}]
+            r = await brain.generar_relevo(hist2, TEL)
+            self.assertIsNotNone(r)
+
+
 class Cerebro(unittest.IsolatedAsyncioTestCase):
     async def correr(self, *respuestas):
         crear = AsyncMock(side_effect=list(respuestas))

@@ -867,21 +867,7 @@ async def generar_recordatorio_equipo(historial: list[dict]) -> str | None:
         "Responde EXACTAMENTE NO_ENVIAR SOLO si: ya tiene cita confirmada, ella dijo que lo piensa "
         "o que ella avisa, pidió no escribirle, o la charla ya cerró con despedida de las dos partes]"
     )
-    mensaje_original = mensaje
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
-    # Si la clienta vuelve a escribir horas después, se le dice a Sofía cuándo (lo ofrecido antes
-    # pudo ocuparse: hay que volver a revisar ANTES de ofrecer, no después de que elija).
-    ult_ts = historial[-1].get("ts") if historial else None
-    if ult_ts is not None:
-        try:
-            from datetime import timezone as _tz
-            if ult_ts.tzinfo is None:
-                ult_ts = ult_ts.replace(tzinfo=_tz.utc)
-            horas = (datetime.now(TZ) - ult_ts).total_seconds() / 3600
-            if horas > 3:
-                mensaje = f"[escrito {int(horas)} h después del mensaje anterior] " + mensaje
-        except Exception:  # noqa: BLE001
-            pass
     mensajes.append({"role": "user", "content": instruccion})
     try:
         r = await client.messages.create(
@@ -917,21 +903,7 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
         "todo el chat (incluye lo que dijo el equipo): no repitas lo ya dicho, no la regañes por no "
         "contestar y no la satures. Suena natural, sin presión. Máx 2 renglones, 1 emoji.]"
     )
-    mensaje_original = mensaje
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
-    # Si la clienta vuelve a escribir horas después, se le dice a Sofía cuándo (lo ofrecido antes
-    # pudo ocuparse: hay que volver a revisar ANTES de ofrecer, no después de que elija).
-    ult_ts = historial[-1].get("ts") if historial else None
-    if ult_ts is not None:
-        try:
-            from datetime import timezone as _tz
-            if ult_ts.tzinfo is None:
-                ult_ts = ult_ts.replace(tzinfo=_tz.utc)
-            horas = (datetime.now(TZ) - ult_ts).total_seconds() / 3600
-            if horas > 3:
-                mensaje = f"[escrito {int(horas)} h después del mensaje anterior] " + mensaje
-        except Exception:  # noqa: BLE001
-            pass
     mensajes.append({"role": "user", "content": instruccion})
     try:
         r = await client.messages.create(
