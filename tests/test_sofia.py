@@ -787,3 +787,68 @@ class RelojFijo2030(_dt):
     def now(cls, tz=None):
         d = _dt(2030, 1, 6, 9, 0)
         return d.replace(tzinfo=tz) if tz else d
+
+
+class OfertaEsCompromiso(unittest.TestCase):
+    """Fuzz: TODA hora que consultar_disponibilidad ofrece se puede agendar después (con el
+    servicio con que se agenda de verdad). Era el error más grande: "tengo 2 o 6" → elige 2 →
+    "ya no tengo esa hora"."""
+
+    CALS = [("depilacion", "cal_depi", ["depil"]), ("faciales", "cal_fac", ["facial"]),
+            ("corporales", "cal_corp", ["corpor"]), ("masajes", "cal_mas", ["masaje"]),
+            ("venta", "cal_venta", ["valorac", "sin costo"])]
+    TITULOS = [("cal_fac", "Ana 3ra sesión facial"), ("cal_corp", "Luz 4ta sesión"),
+               ("cal_venta", "Norma - Exp. única - Facial"), ("cal_venta", "Rosa - Exp. única - Corporal"),
+               ("cal_depi", "COMIDA"), (None, "Develacion de placa"), ("cal_depi", "SRA X FACIAL 2DA SESION"),
+               ("cal_mas", "Masaje relajante Pepa"), (None, "MARIA DE JESUS GONZALEZ"),
+               ("cal_venta", "Cita (por confirmar) - Sesión facial sin costo - Eva")]
+    PIDE = ["facial", "corporal", "Sesión facial sin costo", "Sesión corporal sin costo", "masaje",
+            "depilación", "Valoración facial sin costo", "EMSculpt", "Tratamiento facial", ""]
+
+    def test_lo_ofrecido_se_puede_agendar(self):
+        import random
+        from agent import brain
+        rnd = random.Random(7)
+        fallas = []
+        for dia in range(250):
+            fecha = date(2030, 1, 7 + dia % 6)  # lunes a sábado
+            evs = []
+            for k in range(rnd.randint(0, 9)):
+                cal, tit = rnd.choice(self.TITULOS)
+                h = rnd.randint(9, 18 if fecha.weekday() < 5 else 12)
+                m = rnd.choice([0, 0, 0, 30])
+                dur = rnd.choice([30, 60])
+                ini = _dt(fecha.year, fecha.month, fecha.day, h, m, tzinfo=calendar_tool.TZ)
+                fin = ini + timedelta(minutes=dur)
+                evs.append((cal or calendar_tool.CALENDAR_ID, {
+                    "id": f"e{k}", "summary": tit, "status": "confirmed", "created": "2029-01-01T00:00:00Z",
+                    "description": f"WhatsApp: +52177100000{k:02d}\nServicio: {tit}",
+                    "start": {"dateTime": ini.isoformat()}, "end": {"dateTime": fin.isoformat()}}))
+            pide = rnd.choice(self.PIDE)
+            consulta = brain.servicio_para_consultar(pide)
+            dur_c = 30 if calendar_tool.es_sesion_gratis(pide) else 60
+            svc = MagicMock()
+            svc.events.return_value.insert.return_value.execute.return_value = {"id": "nuestro", "created": "2030-01-01T00:00:00Z"}
+            with patch.object(calendar_tool, "_SERVICE_CALENDARS", self.CALS), \
+                 patch.object(calendar_tool, "_obtener_servicio", lambda: svc), \
+                 patch.object(calendar_tool, "sesion_gratis_previa", lambda *a, **k: None), \
+                 patch.object(calendar_tool, "_eventos_dia_todos", lambda s, f: evs), \
+                 patch.object(calendar_tool, "datetime", RelojViejo):
+                libres = calendar_tool.slots_libres(fecha, dur_c, 60, 20, consulta, "5217719999999")
+                # Se agenda con lo que pidió o con su versión "sin costo" (lo que suele pasar).
+                for agenda in {pide or "Sesión facial sin costo", consulta or "Sesión facial sin costo"}:
+                    for hhmm in libres:
+                        h, m = map(int, hhmm.split(":"))
+                        ini = _dt(fecha.year, fecha.month, fecha.day, h, m, tzinfo=calendar_tool.TZ)
+                        d = 30 if calendar_tool.es_sesion_gratis(agenda) else 60
+                        r = calendar_tool.crear_cita("Ana", "5217719999999", agenda, ini, d)
+                        if not r["ok"]:
+                            fallas.append((fecha, pide, agenda, hhmm, r["error"], [e[1]["summary"] for e in evs]))
+        self.assertEqual(fallas[:5], [], f"{len(fallas)} horas ofrecidas que luego no se pudieron agendar")
+
+
+class RelojViejo(_dt):
+    @classmethod
+    def now(cls, tz=None):
+        d = _dt(2029, 12, 1, 8, 0)
+        return d.replace(tzinfo=tz) if tz else d

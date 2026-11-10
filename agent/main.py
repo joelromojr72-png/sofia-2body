@@ -537,7 +537,9 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
             if eid and not await marcar_evento_procesado(eid):
                 continue
             if msg.texto.strip():
-                await guardar_mensaje(msg.telefono, "assistant", msg.texto)
+                # Se marca como del EQUIPO para que Sofía distinga lo que prometió una persona
+                # (y lo respete: no lo cambia ni lo vuelve a ofrecer).
+                await guardar_mensaje(msg.telefono, "assistant", "[Equipo] " + msg.texto)
                 try:
                     await registrar_outbound_equipo(msg.telefono)
                 except Exception:  # noqa: BLE001

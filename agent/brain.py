@@ -375,6 +375,20 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "que ese horario ya está ocupado, ofrece otra hora; si te dice que la clienta YA tenía "
             "esa cita, NO agendes de nuevo, solo confírmesela. Si la herramienta falla, toma la "
             "solicitud y dígale que el equipo confirma.\n"
+            "LEE TODO EL CHAT antes de contestar: lo que ya dijo la clienta (nombre, servicio, "
+            "día/hora), lo que TÚ ya ofreciste y lo que prometió el EQUIPO (los mensajes que "
+            "empiezan con [Equipo] los escribió una persona del spa: respétalos, no los "
+            "contradigas, no cambies lo que el equipo acordó y no repitas lo que ya se le dijo). "
+            "No vuelvas a preguntar lo que ya contestó ni le ofrezcas dos veces lo mismo. Si "
+            "pasaron horas desde tu última oferta (verás [escrito ... h después]), vuelve a "
+            "consultar ANTES de ofrecer o aceptar una hora, nunca después de que ella eligió.\n"
+            "Si la clienta quiere apartar o pide su cita/promo, usa `consultar_disponibilidad` "
+            "YA y en ese mismo mensaje ofrécele 2 horarios concretos (no esperes a tener su "
+            "nombre; el nombre se pide cuando elija).\n"
+            "OFERTA = COMPROMISO: ofrece SOLO horas que `consultar_disponibilidad` te acaba de dar "
+            "(consulta con el MISMO servicio con el que vas a agendar) y, cuando elija una de esas, "
+            "agéndala directo con `agendar_cita` sin volver a consultar. No escribas \"listo\" ni "
+            "\"le aparté\" antes de que la herramienta lo confirme.\n"
             "CONFIRMACIONES (MUY IMPORTANTE): cuando la clienta responde \"confirmado\", \"sí\", "
             "\"ok\", \"✅\" o similar a la cita que acabas de apartar o a un RECORDATORIO de su cita, "
             "SOLO le agradeces y le confirmas que su cita sigue en pie (mismo día y hora). NO "
@@ -433,6 +447,39 @@ def _es_error_de_esfuerzo(error: Exception) -> bool:
     return "output_config" in texto or "effort" in texto
 
 
+# Servicio de PAGA dicho explícitamente (si no, al consultar se usa la regla de la sesión sin costo).
+_DE_PAGA = re.compile(r"con\s+costo|pagad|paquete|\d+\s*(a|ª|da|ra|ta|va|na)?\s*sesi[oó]n|tratamiento|promo|plan", re.I)
+
+
+def servicio_para_consultar(servicio: str) -> str:
+    """Servicio con el que se consulta disponibilidad: el estricto (sin costo) salvo que sea de paga."""
+    s = (servicio or "").strip()
+    if not s:
+        return s  # sin servicio: cualquier cita ocupa el horario (lo más estricto)
+    if calendar_tool.es_sesion_gratis(s) or _DE_PAGA.search(s):
+        return s
+    return f"{s} sin costo"
+
+
+# Horarios que se le OFRECIERON a cada clienta (para no ofrecer de más ni contradecirse).
+_ofrecidos: dict[str, dict[str, list[str]]] = {}
+
+
+def _recordar_ofrecidos(telefono: str, fecha, libres: list[str]) -> None:
+    if telefono:
+        _ofrecidos.setdefault(telefono, {})[fecha.isoformat()] = list(libres)
+
+
+# Frases que contradicen una cita ya apartada (no se le dicen a quien solo confirma).
+_CONTRADICE = re.compile(
+    r"ya no (est[aá]|tengo|hay|qued[oóa]|aplica)|se (acaba de )?ocup[oó]|percance|disculpe la confusi|"
+    r"no (est[aá]|qued[oó]) (disponible|libre)|ya se ocup",
+    re.I,
+)
+# Marcas internas del historial que el modelo podría copiar en su respuesta.
+_QUITAR_MARCAS = re.compile(r"^\s*\[(Equipo|escrito[^\]]*)\]\s*", re.I | re.M)
+
+
 # Mensaje que SOLO confirma ("sí", "confirmado ✅", "ok"): con eso nunca se mueve ni se cancela
 # una cita. Pasó el 9/10-nov: la clienta decía "Confirmado" y Sofía le cambiaba la hora.
 _SOLO_CONFIRMA = re.compile(
@@ -465,11 +512,19 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
             hd = calendar_tool.horario_dia(fecha)
             if hd is None:
                 return f"El {fecha.isoformat()} es domingo: el spa está cerrado. Ofrece otro día."
-            dur = int(args.get("duracion_min") or 60)
+            servicio_c = (args.get("servicio") or "").strip()
+            # Lo que se OFRECE debe poder AGENDARSE después. Antes se consultaba "facial" y se
+            # agendaba "Sesión facial sin costo" (regla más estricta) → "ya no está disponible".
+            # Por eso: si no dice claramente que es de PAGA, se consulta con la regla de la
+            # sesión sin costo (la más estricta) y con la misma duración que usará agendar_cita.
+            # Duración: 30 min SOLO si ya se sabe que es la sesión sin costo; si no se sabe, 60
+            # (lo más largo que podría agendarse), para que la hora ofrecida siempre quepa.
+            dur = 30 if calendar_tool.es_sesion_gratis(servicio_c) else max(60, int(args.get("duracion_min") or 60))
+            servicio_c = servicio_para_consultar(servicio_c)
             libres = await asyncio.to_thread(
-                calendar_tool.slots_libres, fecha, dur, 60, 8, (args.get("servicio") or "").strip(),
-                telefono or "",
+                calendar_tool.slots_libres, fecha, dur, 60, 8, servicio_c, telefono or "",
             )
+            _recordar_ofrecidos(telefono, fecha, libres)
             ap, ci = hd
             horario = f"Horario ese día: {ap.strftime('%H:%M')}-{ci.strftime('%H:%M')}. "
             # Si la clienta YA tiene cita ese día, se le dice al modelo: esa hora es SUYA.
@@ -545,6 +600,7 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
                 libres = []
             reales = (f" Horarios que SÍ están libres ese día para este servicio: {', '.join(libres)}."
                       if libres else " Ese día ya no queda ningún horario libre para este servicio.")
+            logger.warning(f"Agendar rechazado ({telefono}): {servicio} {inicio.isoformat()} → {res.get('error')}")
             return (
                 f"NO se pudo agendar: {res.get('error', 'error desconocido')}.{reales} "
                 "Ofrécele SOLO de esos (u otro día consultando de nuevo); no le vuelvas a ofrecer "
@@ -645,7 +701,21 @@ async def generar_respuesta(
     ]
     herramientas = HERRAMIENTAS if hay_agenda else []
 
+    mensaje_original = mensaje
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
+    # Si la clienta vuelve a escribir horas después, se le dice a Sofía cuándo (lo ofrecido antes
+    # pudo ocuparse: hay que volver a revisar ANTES de ofrecer, no después de que elija).
+    ult_ts = historial[-1].get("ts") if historial else None
+    if ult_ts is not None:
+        try:
+            from datetime import timezone as _tz
+            if ult_ts.tzinfo is None:
+                ult_ts = ult_ts.replace(tzinfo=_tz.utc)
+            horas = (datetime.now(TZ) - ult_ts).total_seconds() / 3600
+            if horas > 3:
+                mensaje = f"[escrito {int(horas)} h después del mensaje anterior] " + mensaje
+        except Exception:  # noqa: BLE001
+            pass
     # Es el saludo con más volumen de los anuncios y solo con la regla del prompt, a veces contesta
     # con una pregunta abierta (3 de 5 en pruebas). La nota no se guarda en el historial.
     nota = await _nota_primer_mensaje(mensaje, telefono) if not historial else ""
@@ -674,6 +744,8 @@ async def generar_respuesta(
             raise
 
     corregida = False
+    corregida_conf = False
+    accion_agenda = False
     # Lo que escribe ANTES de usar una herramienta (el saludo, casi siempre) también es para la
     # clienta: si solo se manda el último turno, le llega "Tengo mañana a las 11" sin contexto.
     previos: list[str] = []
@@ -690,8 +762,14 @@ async def generar_respuesta(
                 resultados = []
                 for bloque in respuesta.content:
                     if bloque.type == "tool_use":
+                        if bloque.name in ("agendar_cita", "cancelar_cita"):
+                            # Lo que escribió ANTES de agendar/cancelar ("¡Listo, le aparto las 2!")
+                            # no se manda: si la herramienta falla, la clienta recibiría un "sí" y
+                            # luego un "ya no hay". El mensaje final ya dice el resultado real.
+                            previos.clear()
+                            accion_agenda = True
                         salida = await _ejecutar_herramienta(
-                            bloque.name, bloque.input or {}, telefono, mensaje
+                            bloque.name, bloque.input or {}, telefono, mensaje_original
                         )
                         resultados.append(
                             {
@@ -713,7 +791,24 @@ async def generar_respuesta(
             if not texto:
                 logger.warning("Claude devolvio una respuesta sin texto")
                 return obtener_mensaje_fallback(), False
+            if accion_agenda:
+                previos.clear()
             texto = "\n\n".join(previos + [texto])
+            texto = _QUITAR_MARCAS.sub("", texto).strip()
+            # Auditoría final: a quien SOLO confirma nunca se le dice que su hora ya no está.
+            if solo_confirma(mensaje_original) and _CONTRADICE.search(texto):
+                logger.warning(f"Respuesta contradictoria a una confirmación (…{telefono[-4:]}): {texto[:120]}")
+                if corregida_conf:
+                    return obtener_mensaje_fallback(), False  # mejor que lo vea el equipo
+                corregida_conf = True
+                previos.clear()
+                mensajes.append({"role": "assistant", "content": texto})
+                mensajes.append({"role": "user", "content": (
+                    "[NOTA INTERNA — no la menciones: la clienta SOLO confirmó su cita. Tu mensaje le "
+                    "decía que su hora ya no está o le cambiaba el horario, y NO se envió. Su cita "
+                    "sigue igual: reescríbelo agradeciéndole y confirmándole su mismo día y hora.]"
+                )})
+                continue
             vencida = _frase_vencida(texto)
             if vencida:
                 logger.warning(f"Respuesta con promo vencida ('{vencida}') para …{telefono[-4:]}")
@@ -772,7 +867,21 @@ async def generar_recordatorio_equipo(historial: list[dict]) -> str | None:
         "Responde EXACTAMENTE NO_ENVIAR SOLO si: ya tiene cita confirmada, ella dijo que lo piensa "
         "o que ella avisa, pidió no escribirle, o la charla ya cerró con despedida de las dos partes]"
     )
+    mensaje_original = mensaje
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
+    # Si la clienta vuelve a escribir horas después, se le dice a Sofía cuándo (lo ofrecido antes
+    # pudo ocuparse: hay que volver a revisar ANTES de ofrecer, no después de que elija).
+    ult_ts = historial[-1].get("ts") if historial else None
+    if ult_ts is not None:
+        try:
+            from datetime import timezone as _tz
+            if ult_ts.tzinfo is None:
+                ult_ts = ult_ts.replace(tzinfo=_tz.utc)
+            horas = (datetime.now(TZ) - ult_ts).total_seconds() / 3600
+            if horas > 3:
+                mensaje = f"[escrito {int(horas)} h después del mensaje anterior] " + mensaje
+        except Exception:  # noqa: BLE001
+            pass
     mensajes.append({"role": "user", "content": instruccion})
     try:
         r = await client.messages.create(
@@ -782,7 +891,7 @@ async def generar_recordatorio_equipo(historial: list[dict]) -> str | None:
         logger.error(f"Error generando recordatorio del equipo: {e}")
         _marcar_cerebro(False, str(e))
         return None
-    texto = _extraer_texto(r)
+    texto = _QUITAR_MARCAS.sub("", _extraer_texto(r)).strip()
     if not texto:
         return None
     return NO_ENVIAR if (NO_ENVIAR in texto or _frase_vencida(texto)) else texto
@@ -808,7 +917,21 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
         "todo el chat (incluye lo que dijo el equipo): no repitas lo ya dicho, no la regañes por no "
         "contestar y no la satures. Suena natural, sin presión. Máx 2 renglones, 1 emoji.]"
     )
+    mensaje_original = mensaje
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
+    # Si la clienta vuelve a escribir horas después, se le dice a Sofía cuándo (lo ofrecido antes
+    # pudo ocuparse: hay que volver a revisar ANTES de ofrecer, no después de que elija).
+    ult_ts = historial[-1].get("ts") if historial else None
+    if ult_ts is not None:
+        try:
+            from datetime import timezone as _tz
+            if ult_ts.tzinfo is None:
+                ult_ts = ult_ts.replace(tzinfo=_tz.utc)
+            horas = (datetime.now(TZ) - ult_ts).total_seconds() / 3600
+            if horas > 3:
+                mensaje = f"[escrito {int(horas)} h después del mensaje anterior] " + mensaje
+        except Exception:  # noqa: BLE001
+            pass
     mensajes.append({"role": "user", "content": instruccion})
     try:
         r = await client.messages.create(
@@ -818,7 +941,7 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
         logger.error(f"Error generando seguimiento: {e}")
         _marcar_cerebro(False, str(e))
         return None
-    texto = _extraer_texto(r)
+    texto = _QUITAR_MARCAS.sub("", _extraer_texto(r)).strip()
     if texto and _frase_vencida(texto):
         logger.warning("Seguimiento descartado: mencionaba una promo vencida")
         return None

@@ -354,7 +354,21 @@ async def obtener_historial_equipo(telefono: str, limite: int = 20) -> list[dict
     return salida
 
 
-async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
+_DIAS_SEM = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+
+def _marca_tiempo(ts: datetime | None) -> str:
+    """'lunes 9 a las 20:10' en hora de Pachuca (para que Sofía sepa cuándo se dijo algo)."""
+    if ts is None:
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    from zoneinfo import ZoneInfo
+    t = ts.astimezone(ZoneInfo("America/Mexico_City"))
+    return f"{_DIAS_SEM[t.weekday()]} {t.day} a las {t.strftime('%H:%M')}"
+
+
+async def obtener_historial(telefono: str, limite: int = 60) -> list[dict]:
     """
     Devuelve los ultimos N mensajes de una conversacion, en orden cronologico.
 
@@ -382,12 +396,23 @@ async def obtener_historial(telefono: str, limite: int = 20) -> list[dict]:
     # historial incluye mensajes del equipo humano (guardados como 'assistant'): si el equipo
     # manda 2 seguidos, o el equipo y luego Sofía, quedarían 2 'assistant' pegados y la API
     # de Anthropic exige que los roles se alternen.
+    # Si entre un mensaje y el anterior pasaron más de 3 h, al mensaje de la clienta se le antepone
+    # cuándo lo escribió: así Sofía sabe que lo que ofreció ayer pudo cambiar y no se contradice.
     salida: list[dict] = []
+    previo_ts = None
     for m in mensajes:
+        contenido = m.content
+        ts = m.timestamp
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if m.role == "user" and previo_ts is not None and ts is not None and (ts - previo_ts) > timedelta(hours=3):
+            contenido = f"[escrito el {_marca_tiempo(ts)}] {contenido}"
+        previo_ts = ts or previo_ts
         if salida and salida[-1]["role"] == m.role:
-            salida[-1]["content"] += "\n" + m.content
+            salida[-1]["content"] += "\n" + contenido
+            salida[-1]["ts"] = ts
         else:
-            salida.append({"role": m.role, "content": m.content})
+            salida.append({"role": m.role, "content": contenido, "ts": ts})
     return salida
 
 
