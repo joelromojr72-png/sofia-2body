@@ -20,6 +20,8 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 
 from agent import atribucion, followup
+from agent.consola import chat_pausado
+from agent.consola import router as consola_router
 from agent.brain import estado_cerebro, generar_respuesta
 from agent.memory import (
     guardar_mensaje,
@@ -235,6 +237,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AgentKit — WhatsApp AI Agent", version="2.0.0", lifespan=lifespan)
+
+# APEX Console (bandeja en vivo del equipo): API protegida con X-Console-Key.
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"https://(apex-[a-z0-9-]+\.vercel\.app|localhost(:\d+)?)|http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["X-Console-Key", "Content-Type"],
+)
+app.include_router(consola_router)
 
 
 @app.get("/")
@@ -605,6 +618,14 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
                 f"[equipo en vivo] Sofía no responde (el equipo escribió hace < "
                 f"{SILENCIO_TRAS_EQUIPO_MIN} min): {msg.telefono}"
             )
+            continue
+
+        # El equipo apagó a Sofía en ESTE chat desde la consola: se guarda y no se contesta.
+        if await chat_pausado(msg.telefono):
+            if not msg.telefono.startswith("msgr:"):
+                await registrar_inbound_lead(msg.telefono, msg.texto)
+            await guardar_mensaje(msg.telefono, "user", msg.texto)
+            logger.info(f"[chat pausado en consola] Sofía no responde: {msg.telefono}")
             continue
 
         if _excede_tope_respuestas(msg.telefono):

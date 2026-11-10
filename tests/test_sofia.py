@@ -852,3 +852,85 @@ class RelojViejo(_dt):
     def now(cls, tz=None):
         d = _dt(2029, 12, 1, 8, 0)
         return d.replace(tzinfo=tz) if tz else d
+
+
+class Consola(Base):
+    """API de la APEX Console: lista chats, muestra mensajes, manda como equipo y pausa a Sofía."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from agent import consola
+        async with memory.async_session() as s:
+            await s.execute(delete(consola.ChatPausa))
+            await s.commit()
+        os.environ["CONSOLE_KEY"] = "clave-consola"
+        self.cli = httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://t")
+        self.h = {"X-Console-Key": "clave-consola"}
+
+    async def asyncTearDown(self):
+        await self.cli.aclose()
+        await super().asyncTearDown()
+
+    async def test_sin_clave_no_entra(self):
+        r = await self.cli.get("/console/chats")
+        self.assertEqual(r.status_code, 401)
+        r = await self.cli.get("/console/chats", headers={"X-Console-Key": "mala"})
+        self.assertEqual(r.status_code, 401)
+
+    async def test_lista_y_autores(self):
+        await memory.guardar_mensaje(TEL, "user", "Hola, quiero facial")
+        await memory.guardar_mensaje(TEL, "assistant", "¡Hola! Soy Sofía")
+        await memory.guardar_mensaje(TEL, "assistant", "[Equipo] Le aparto el martes")
+        await memory.guardar_mensaje("msgr:999", "user", "info?")
+        r = await self.cli.get("/console/chats", headers=self.h)
+        self.assertEqual(r.status_code, 200)
+        chats = r.json()["chats"]
+        self.assertEqual([c["tel"] for c in chats], ["msgr:999", TEL])
+        self.assertTrue(chats[0]["pendiente"])
+        self.assertEqual(chats[0]["canal"], "messenger")
+        self.assertEqual(chats[1]["ultimo"]["autor"], "equipo")
+        self.assertEqual(chats[1]["ultimo"]["texto"], "Le aparto el martes")
+        with patch("agent.consola._citas", AsyncMock(return_value=[])):
+            r = await self.cli.get("/console/chat", params={"tel": TEL}, headers=self.h)
+        autores = [m["autor"] for m in r.json()["mensajes"]]
+        self.assertEqual(autores, ["cliente", "sofia", "equipo"])
+        ult = r.json()["mensajes"][-1]["id"]
+        await memory.guardar_mensaje(TEL, "user", "gracias")
+        r = await self.cli.get("/console/chat", params={"tel": TEL, "desde_id": ult}, headers=self.h)
+        self.assertEqual([m["texto"] for m in r.json()["mensajes"]], ["gracias"])
+
+    async def test_enviar_como_equipo_calla_a_sofia(self):
+        prov = MagicMock()
+        prov.enviar_mensaje = AsyncMock(return_value=True)
+        with patch.object(main, "proveedor", prov):
+            r = await self.cli.post("/console/enviar", json={"tel": TEL, "texto": "Hola, soy Ana"}, headers=self.h)
+        self.assertEqual(r.status_code, 200, r.text)
+        prov.enviar_mensaje.assert_awaited_once_with(TEL, "Hola, soy Ana")
+        hist = await memory.obtener_historial_equipo(TEL)
+        self.assertIn("[Equipo] Hola, soy Ana", hist[-1]["content"])
+        self.assertTrue(await memory.equipo_activo_reciente(TEL, 60))
+
+    async def test_envio_fallido_avisa(self):
+        prov = MagicMock()
+        prov.enviar_mensaje = AsyncMock(return_value=False)
+        with patch.object(main, "proveedor", prov):
+            r = await self.cli.post("/console/enviar", json={"tel": TEL, "texto": "x"}, headers=self.h)
+        self.assertEqual(r.status_code, 409)
+
+    async def test_pausa_por_chat(self):
+        from agent import consola
+        r = await self.cli.post("/console/pausa", json={"tel": TEL, "pausar": True}, headers=self.h)
+        self.assertTrue(r.json()["sofia_pausada"])
+        self.assertTrue(await consola.chat_pausado(TEL))
+        self.assertFalse(await consola.chat_pausado("5210000000002"))
+        await self.cli.post("/console/pausa", json={"tel": TEL, "pausar": False}, headers=self.h)
+        self.assertFalse(await consola.chat_pausado(TEL))
+
+    async def test_cors_de_la_consola(self):
+        r = await self.cli.options("/console/chats", headers={
+            "Origin": "https://apex-console-two.vercel.app", "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Console-Key"})
+        self.assertEqual(r.headers.get("access-control-allow-origin"), "https://apex-console-two.vercel.app")
+        r = await self.cli.options("/console/chats", headers={
+            "Origin": "https://malo.com", "Access-Control-Request-Method": "GET"})
+        self.assertNotEqual(r.headers.get("access-control-allow-origin"), "https://malo.com")
