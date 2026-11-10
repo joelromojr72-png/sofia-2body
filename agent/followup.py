@@ -151,6 +151,14 @@ async def _ciclo_nudge(proveedor) -> int:
     return enviados
 
 
+async def _al_historial(telefono: str, texto: str) -> None:
+    """Guarda en la charla un mensaje automático que se mandó por plantilla (no truena si falla)."""
+    try:
+        await memory.guardar_mensaje(telefono, "assistant", texto)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"No se pudo guardar el recordatorio en el historial de …{telefono[-4:]}: {e}")
+
+
 async def _ciclo(proveedor) -> int:
     templates = _templates()
     lang = _lang()
@@ -379,6 +387,10 @@ async def _ciclo_confirmaciones(proveedor) -> int:
         if ok:
             enviados += 1
             logger.info(f"Recordatorio del día antes enviado a …{tel10[-4:]} ({params[1]}, {params[2]})")
+            # Al historial, para que Sofía sepa a qué contesta "Sí" (antes no lo veía y movía la cita).
+            await _al_historial("521" + tel10, (
+                f"Hola {params[0]}, te recordamos tu cita en 2Body Pachuca: {params[1]}, {params[2]}. "
+                "¿Nos confirmas tu asistencia? Responde SÍ para apartar tu lugar 💜"))
         else:
             await memory.liberar_evento(dkey)  # soltar para reintentar el próximo ciclo
             for eid in g["eventos"]:
@@ -566,6 +578,9 @@ async def _ciclo_recordatorio_hoy(proveedor) -> int:
         if ok:
             enviados += 1
             logger.info(f"Recordatorio del día enviado a {tel} ({nombre}, {inicio.strftime('%H:%M')}, {servicio})")
+            await _al_historial(tel, (
+                f"[Recordatorio automático] Hola {nombre}, le recordamos su cita de HOY a las "
+                f"{inicio.strftime('%H:%M')} ({servicio}) en 2Body Pachuca. ¿Nos confirma su asistencia? 💜"))
         else:
             await memory.liberar_evento(clave)  # p. ej. plantilla aún no aprobada: se reintenta
         await asyncio.sleep(1.5)

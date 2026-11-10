@@ -375,6 +375,13 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "que ese horario ya está ocupado, ofrece otra hora; si te dice que la clienta YA tenía "
             "esa cita, NO agendes de nuevo, solo confírmesela. Si la herramienta falla, toma la "
             "solicitud y dígale que el equipo confirma.\n"
+            "CONFIRMACIONES (MUY IMPORTANTE): cuando la clienta responde \"confirmado\", \"sí\", "
+            "\"ok\", \"✅\" o similar a la cita que acabas de apartar o a un RECORDATORIO de su cita, "
+            "SOLO le agradeces y le confirmas que su cita sigue en pie (mismo día y hora). NO "
+            "vuelvas a consultar disponibilidad, NO la muevas, NO canceles y NUNCA le digas que "
+            "\"ya no está disponible\" o que hubo un \"percance\": su cita YA es suya. Solo se "
+            "cambia una cita cuando ELLA pide expresamente otro día u otra hora. Si dudas de qué "
+            "cita confirma, usa `consultar_mis_citas` (solo para leer).\n"
             "Para CANCELAR: usa `consultar_mis_citas` para ver sus citas; si tiene una sola, "
             "confirma con ella que esa quiere cancelar y usa `cancelar_cita`; si tiene varias, "
             "pregúntele cuál. Nunca canceles sin confirmar. Los evento_id son internos: no se "
@@ -426,8 +433,32 @@ def _es_error_de_esfuerzo(error: Exception) -> bool:
     return "output_config" in texto or "effort" in texto
 
 
-async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
+# Mensaje que SOLO confirma ("sí", "confirmado ✅", "ok"): con eso nunca se mueve ni se cancela
+# una cita. Pasó el 9/10-nov: la clienta decía "Confirmado" y Sofía le cambiaba la hora.
+_SOLO_CONFIRMA = re.compile(
+    r"^[\s¡!.,]*(s[ií]+|sip|confirmad[oa]s?|confirmo|ok(ay)?|va|vale|listo|perfecto|claro( que s[ií])?|"
+    r"de acuerdo|correcto|ah[ií] estar[eé]|all[aá] nos vemos|gracias)?[\s!.,💜✅👍🙏🌸😊☺️❤️]*$",
+    re.I,
+)
+
+
+def solo_confirma(mensaje: str) -> bool:
+    m = (mensaje or "").strip()
+    return bool(m) and bool(_SOLO_CONFIRMA.match(m))
+
+
+async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje: str = "") -> str:
     """Corre una herramienta y devuelve un texto para el bloque tool_result."""
+    if solo_confirma(mensaje) and (
+        nombre == "cancelar_cita"
+        or (nombre == "agendar_cita" and (args.get("reemplaza_evento_id") or "").strip())
+    ):
+        logger.info(f"Candado: la clienta solo confirmó ({mensaje!r}); no se mueve/cancela su cita")
+        return (
+            "NO se hizo nada: la clienta SOLO está confirmando su cita. Su cita sigue apartada "
+            "igual (mismo día y hora). Agradécele y confírmale con calidez; no le ofrezcas otro "
+            "horario ni le digas que ya no hay espacio."
+        )
     try:
         if nombre == "consultar_disponibilidad":
             fecha = date.fromisoformat(args["fecha"])
@@ -436,10 +467,24 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
                 return f"El {fecha.isoformat()} es domingo: el spa está cerrado. Ofrece otro día."
             dur = int(args.get("duracion_min") or 60)
             libres = await asyncio.to_thread(
-                calendar_tool.slots_libres, fecha, dur, 60, 8, (args.get("servicio") or "").strip()
+                calendar_tool.slots_libres, fecha, dur, 60, 8, (args.get("servicio") or "").strip(),
+                telefono or "",
             )
             ap, ci = hd
             horario = f"Horario ese día: {ap.strftime('%H:%M')}-{ci.strftime('%H:%M')}. "
+            # Si la clienta YA tiene cita ese día, se le dice al modelo: esa hora es SUYA.
+            try:
+                suyas = [c for c in await asyncio.to_thread(calendar_tool.buscar_citas_de, telefono or "", 30)
+                         if c.get("fecha") == fecha.isoformat()]
+            except Exception:  # noqa: BLE001
+                suyas = []
+            if suyas:
+                horario = (
+                    "OJO: esta clienta YA TIENE cita ese día ("
+                    + "; ".join(f"{c['servicio']} {c['cuando']}" for c in suyas)
+                    + "). Ese horario es SUYO y sigue apartado: si solo está confirmando, NO se lo "
+                    "cambies ni le digas que ya no hay. " + horario
+                )
             if not libres:
                 return (
                     horario + "Ese día YA NO tiene huecos libres (todo ocupado o ya pasó la hora). "
@@ -494,7 +539,7 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str) -> str:
             # Para no decir "sí hay" y luego "no hay": los huecos reales de ese día, ya con este servicio.
             try:
                 libres = await asyncio.to_thread(
-                    calendar_tool.slots_libres, inicio.date(), duracion, 60, 6, servicio
+                    calendar_tool.slots_libres, inicio.date(), duracion, 60, 6, servicio, telefono or ""
                 )
             except Exception:  # noqa: BLE001
                 libres = []
@@ -646,7 +691,7 @@ async def generar_respuesta(
                 for bloque in respuesta.content:
                     if bloque.type == "tool_use":
                         salida = await _ejecutar_herramienta(
-                            bloque.name, bloque.input or {}, telefono
+                            bloque.name, bloque.input or {}, telefono, mensaje
                         )
                         resultados.append(
                             {

@@ -359,6 +359,79 @@ class UnaGratisALaVez(unittest.TestCase):
         self.assertIn("10:00", self._libres("Tratamiento corporal", [cita]))
 
 
+class ConfirmarNoMueve(UnaGratisALaVez):
+    """10-nov: la clienta decía "Confirmado" y Sofía le cambiaba la hora (su propia cita le
+    salía como ocupada); la COMIDA y la develación de placa no bloqueaban a todo el spa."""
+
+    CALS = [("depilacion", "cal_depi", ["depil"]), ("faciales", "cal_fac", ["facial"]),
+            ("corporales", "cal_corp", ["corpor"])]
+
+    def _libres_ev(self, servicio, eventos, tel=""):
+        with patch.object(calendar_tool, "_SERVICE_CALENDARS", self.CALS), \
+             patch.object(calendar_tool, "_obtener_servicio", lambda: MagicMock()), \
+             patch.object(calendar_tool, "_eventos_dia_todos", lambda svc, f: eventos):
+            return calendar_tool.slots_libres(self.FECHA, 30, 60, 20, servicio, tel)
+
+    def test_su_propia_cita_no_le_ocupa_la_hora(self):
+        suya = self._evento("Cita (por confirmar) - Sesión corporal sin costo - Zinahi", hora=19, tel="5217298701225")
+        self.assertNotIn("19:00", self._libres_ev("Sesión corporal sin costo", [suya]))
+        self.assertIn("19:00", self._libres_ev("Sesión corporal sin costo", [suya], "5217298701225"))
+
+    def test_volver_a_agendar_su_misma_hora_no_dice_ocupado(self):
+        # Otra clienta (facial gratis) va PRIMERO en la lista; antes eso devolvía "ocupado".
+        otra = self._evento("Lupita Exp. Única - Facial")
+        suya = self._evento("Cita (por confirmar) - Sesión corporal sin costo - Ana", id_="suya", tel="5217719999999")
+        r, svc = self._crear("Sesión corporal sin costo", [otra, suya])
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r.get("duplicada"))
+        svc.events.return_value.insert.assert_not_called()
+
+    def test_comida_bloquea_a_todos_los_servicios(self):
+        comida = ("cal_depi", {"id": "c", "summary": "COMIDA", "description": "",
+                               "start": {"dateTime": "2030-01-07T14:00:00-06:00"},
+                               "end": {"dateTime": "2030-01-07T15:00:00-06:00"}})
+        for servicio in ("Sesión facial sin costo", "Sesión corporal sin costo", "Depilación axilas", "Masaje relajante"):
+            with self.subTest(servicio=servicio):
+                self.assertNotIn("14:00", self._libres_ev(servicio, [comida]))
+                self.assertIn("13:00", self._libres_ev(servicio, [comida]))
+
+    def test_develacion_de_placa_bloquea_facial(self):
+        ev = (calendar_tool.CALENDAR_ID, {"id": "d", "summary": "Develacion de placa Redmuem", "description": "",
+                                          "start": {"dateTime": "2030-01-07T18:00:00-06:00"},
+                                          "end": {"dateTime": "2030-01-07T19:00:00-06:00"}})
+        self.assertNotIn("18:00", self._libres_ev("Sesión facial sin costo", [ev]))
+
+    def test_facial_apuntado_en_otro_calendario_ocupa_faciales(self):
+        ev = ("cal_depi", {"id": "s", "summary": "SRA. SKINFIELD FACIAL 2DA. SESION", "description": "",
+                           "start": {"dateTime": "2030-01-07T11:00:00-06:00"},
+                           "end": {"dateTime": "2030-01-07T12:00:00-06:00"}})
+        self.assertNotIn("11:00", self._libres_ev("Tratamiento facial", [ev]))
+        self.assertIn("11:00", self._libres_ev("Tratamiento corporal", [ev]))
+
+    def test_cita_de_sofia_por_confirmar_no_es_bloqueo(self):
+        self.assertFalse(calendar_tool.es_bloqueo({"summary": "Cita (por confirmar) - Junta de piel - Ana"}))
+        self.assertTrue(calendar_tool.es_bloqueo({"summary": "COMIDA"}))
+        self.assertFalse(calendar_tool.es_bloqueo({"summary": "Norma Torres - Exp. única - Facial"}))
+
+
+class CandadoConfirmacion(unittest.IsolatedAsyncioTestCase):
+    async def test_solo_confirmar_no_mueve_ni_cancela(self):
+        from agent import brain
+        for msg in ("Si", "Confirmado!!", "Confirmado ✅", "✅", "ok"):
+            with self.subTest(msg=msg):
+                r = await brain._ejecutar_herramienta(
+                    "agendar_cita", {"nombre": "Ana", "servicio": "facial", "fecha_hora": "2030-01-07T18:00",
+                                     "reemplaza_evento_id": "x"}, "5217719999999", msg)
+                self.assertIn("SOLO está confirmando", r)
+                r = await brain._ejecutar_herramienta("cancelar_cita", {"evento_id": "x"}, "5217719999999", msg)
+                self.assertIn("SOLO está confirmando", r)
+
+    def test_pedir_cambio_si_pasa(self):
+        from agent import brain
+        for msg in ("Me la cambias al jueves?", "6pm", "No puedo, mejor el viernes"):
+            self.assertFalse(brain.solo_confirma(msg))
+
+
 class CategoriaServicio(unittest.TestCase):
     def test_lo_explicito_manda_sobre_palabras_sueltas(self):
         casos = {

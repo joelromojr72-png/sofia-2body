@@ -196,6 +196,26 @@ _SERVICIO_POR_COLOR = {
 _PRINCIPAL_POR_DEFECTO = os.getenv("CATEGORIA_CALENDARIO_PRINCIPAL", "corporales").strip() or None
 
 
+# Bloqueos del equipo (comida, juntas, eventos como una develación de placa, cierres): no son
+# citas de un servicio, ocupan a TODO el spa. Se marcan sin categoría (None), y una cita sin
+# categoría choca con cualquier servicio. Antes la COMIDA (apuntada en el calendario de
+# depilación) dejaba libres las 14:00 para facial/corporal, y la "Develación de placa" del
+# principal contaba como corporal y dejaba libre esa hora para facial (10-nov).
+_BLOQUEO = re.compile(
+    r"\b(comida|almuerzo|descanso|junta|reuni[oó]n|develaci[oó]n|evento|cerrad[oa]|bloque[oa]?|"
+    r"bloqueado|capacitaci[oó]n|curso|inventario|vacaciones|no\s+agendar|no\s+disponible|"
+    r"permiso|inauguraci[oó]n|mantenimiento)\b",
+    re.I,
+)
+
+
+def es_bloqueo(ev: dict) -> bool:
+    """¿Es un bloqueo del equipo (comida, junta, evento) y no la cita de una clienta?"""
+    if "por confirmar" in (ev.get("summary", "") or "").lower():
+        return False
+    return bool(_BLOQUEO.search(ev.get("summary", "") or ""))
+
+
 def _categoria_evento(cal_id: str, ev: dict, explicita: bool = False) -> str | None:
     """
     Categoría de una cita ya agendada: por su calendario de servicio; si es de venta o del
@@ -203,6 +223,8 @@ def _categoria_evento(cal_id: str, ev: dict, explicita: bool = False) -> str | N
     principal sin nada de eso, corporal (ver arriba) — salvo con explicita=True (para el
     texto del recordatorio, donde solo se usa lo que está escrito o pintado).
     """
+    if es_bloqueo(ev):
+        return None  # ocupa a todo el spa
     clave = next((c for c, cid, _ in _SERVICE_CALENDARS if cid == cal_id), None)
     if clave in _CATEGORIAS:
         return clave
@@ -224,6 +246,29 @@ MAX_CITAS_SIMULTANEAS = int(os.getenv("MAX_CITAS_SIMULTANEAS") or "2")
 def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:
     """Dos citas traslapadas chocan si son del mismo servicio o si alguna es de servicio desconocido."""
     return cat_nueva is None or cat_existente is None or cat_nueva == cat_existente
+
+
+def _categoria_titulo(ev: dict) -> str | None:
+    """Servicio que dice el TÍTULO de la cita (puede no coincidir con el calendario donde está)."""
+    if es_bloqueo(ev):
+        return None
+    return categoria_servicio(ev.get("summary", "") or "")
+
+
+def _choca_evento(cat_nueva: str | None, cal_id: str, ev: dict) -> bool:
+    """Choca si choca por su calendario/categoría o si su título dice el mismo servicio."""
+    if _chocan(cat_nueva, _categoria_evento(cal_id, ev)):
+        return True
+    ct = _categoria_titulo(ev)
+    return bool(cat_nueva and ct and ct == cat_nueva)
+
+
+def _es_de_clienta(ev: dict, tel_digits: str) -> bool:
+    """¿La cita es de esta clienta (su WhatsApp viene en la descripción)?"""
+    if not tel_digits or len(tel_digits) < 10:
+        return False
+    desc = "".join(c for c in (ev.get("description", "") or "") if c.isdigit())
+    return tel_digits[-10:] in desc
 
 
 # ── Una sola sesión sin costo por clienta ────────────────────────────────────
@@ -508,14 +553,17 @@ def citas_del_dia(fecha: date) -> list[dict]:
                 "fin": df.strftime("%H:%M"),
                 "titulo": ev.get("summary", "Ocupado"),
                 "categoria": _categoria_evento(cal_id, ev),
-                "gratis": _es_cita_gratis(ev),
+                "categoria_titulo": _categoria_titulo(ev),
+                "gratis": _es_cita_gratis(ev) and not es_bloqueo(ev),
+                "_ev": ev,
             }
         )
     return citas
 
 
 def slots_libres(
-    fecha: date, duracion_min: int = 60, paso_min: int = 60, max_slots: int = 8, servicio: str = ""
+    fecha: date, duracion_min: int = 60, paso_min: int = 60, max_slots: int = 8, servicio: str = "",
+    telefono: str = "",
 ) -> list[str]:
     """
     Horarios de inicio REALMENTE LIBRES de un día para ese servicio, para que Sofía ofrezca
@@ -533,14 +581,19 @@ def slots_libres(
 
     ocupadas: list[tuple[time, time]] = []   # chocan por mismo servicio
     todas: list[tuple[time, time]] = []      # todas, para el tope de citas simultáneas
+    tel_digits = "".join(ch for ch in (telefono or "") if ch.isdigit())
     for c in citas_del_dia(fecha):
         try:
             hi = datetime.strptime(c["inicio"], "%H:%M").time()
             hf = datetime.strptime(c["fin"], "%H:%M").time()
         except (ValueError, KeyError):
             continue
+        if _es_de_clienta(c.get("_ev") or {}, tel_digits):
+            continue  # su propia cita no le ocupa el horario (al confirmar, sigue libre para ella)
         todas.append((hi, hf))
-        if _chocan(cat_nueva, c.get("categoria")) or (nueva_gratis and c.get("gratis")):
+        ct = c.get("categoria_titulo")
+        if (_chocan(cat_nueva, c.get("categoria")) or (cat_nueva and ct == cat_nueva)
+                or (nueva_gratis and c.get("gratis"))):
             ocupadas.append((hi, hf))
 
     ahora = datetime.now(TZ)
@@ -749,6 +802,8 @@ def crear_cita(
     nueva_gratis = es_sesion_gratis(servicio) and _una_gratis_por_hora(inicio.date())
     simultaneas = 0  # citas de OTRAS clientas a esa hora (tope MAX_CITAS_SIMULTANEAS)
 
+    # Su propia cita va primero: si ya tiene una a esa hora, no se le dice "ocupado".
+    existentes.sort(key=lambda ce: 0 if _es_de_clienta(ce[1], tel_digits) else 1)
     for _cal, ev in existentes:
         if ev.get("status") == "cancelled":
             continue
@@ -780,13 +835,13 @@ def crear_cita(
                     "ok": False,
                     "error": f"A esa hora ({inicio.strftime('%H:%M')}) ya hay {MAX_CITAS_SIMULTANEAS} citas; ofrece otra hora.",
                 }
-            if nueva_gratis and _es_cita_gratis(ev):
+            if nueva_gratis and _es_cita_gratis(ev) and not es_bloqueo(ev):
                 logger.info(f"Ya hay otra sesión sin costo, se rechaza: {inicio.isoformat()}")
                 return {
                     "ok": False,
                     "error": f"A esa hora ({inicio.strftime('%H:%M')}) ya hay otra sesión sin costo; ofrece otra hora.",
                 }
-            if not _chocan(cat_nueva, _categoria_evento(_cal, ev)):
+            if not _choca_evento(cat_nueva, _cal, ev):
                 continue  # otro servicio: se empalma
             logger.info(f"Horario ocupado, se rechaza: {inicio.isoformat()} (choca con {ev_ini.isoformat()})")
             return {
@@ -879,8 +934,8 @@ def crear_cita(
                 # Si Google les puso la misma hora de creación, desempata el id: así solo cede una.
                 antes = (otro.get("created", ""), otro.get("id", "")) < (nuestro_created, nuestro_id)
                 previas += 1 if antes else 0
-                dos_gratis = nueva_gratis and _es_cita_gratis(otro)
-                if not dos_gratis and not _chocan(cat_nueva, _categoria_evento(_cal, otro)) and previas < MAX_CITAS_SIMULTANEAS:
+                dos_gratis = nueva_gratis and _es_cita_gratis(otro) and not es_bloqueo(otro)
+                if not dos_gratis and not _choca_evento(cat_nueva, _cal, otro) and previas < MAX_CITAS_SIMULTANEAS:
                     continue  # otro servicio y sin pasar el tope: se puede empalmar
                 if antes:
                     try:
@@ -981,6 +1036,7 @@ def buscar_citas_de(telefono: str, dias_adelante: int = 90, nombres: list[str] |
                     "servicio": servicio,
                     "titulo": ev.get("summary", ""),
                     "de_sofia": es_cita_de_sofia(ev),
+                    "fecha": di.date().isoformat(),
                     "_inicio": di,
                 }
             )
