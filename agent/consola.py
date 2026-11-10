@@ -80,7 +80,7 @@ async def estado(x_console_key: str | None = Header(default=None)):
         "sofia_global_pausada": sofia_pausada(),
         "sofia_turno": sofia_debe_responder(),  # False = horario del equipo humano
         "agenda": calendar_tool.calendario_configurado(),
-        "cerebro": estado_cerebro(),
+        "cerebro": dict(estado_cerebro) if isinstance(estado_cerebro, dict) else str(estado_cerebro),
         "ahora": ahora().isoformat(),
     }
 

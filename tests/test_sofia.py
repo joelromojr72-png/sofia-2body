@@ -934,3 +934,10 @@ class Consola(Base):
         r = await self.cli.options("/console/chats", headers={
             "Origin": "https://malo.com", "Access-Control-Request-Method": "GET"})
         self.assertNotEqual(r.headers.get("access-control-allow-origin"), "https://malo.com")
+
+
+class ConsolaEstado(Consola):
+    async def test_estado(self):
+        r = await self.cli.get("/console/estado", headers=self.h)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIn("sofia_turno", r.json())
