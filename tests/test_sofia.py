@@ -243,9 +243,10 @@ class AnuncioYDuracion(unittest.IsolatedAsyncioTestCase):
             await brain._ejecutar_herramienta("agendar_cita", args, TEL)
         return crear.call_args.args[4]
 
-    async def test_cita_sin_costo_dura_30(self):
-        self.assertEqual(await self._duracion("Valoración facial sin costo", 60), 30)
-        self.assertEqual(await self._duracion("Sesión corporal sin costo"), 30)
+    async def test_cita_sin_costo_aparta_la_hora_completa(self):
+        # 11-nov (Joel): llegan tarde y con la venta se hacen ~50 min → la gratis ocupa la hora.
+        self.assertEqual(await self._duracion("Valoración facial sin costo", 30), 60)
+        self.assertEqual(await self._duracion("Sesión corporal sin costo"), 60)
         self.assertEqual(await self._duracion("Paquete facial 12 sesiones"), 60)
         self.assertEqual(await self._duracion("Masaje", 90), 90)
 
@@ -338,6 +339,14 @@ class UnaGratisALaVez(unittest.TestCase):
         with patch.object(calendar_tool, "citas_del_dia", lambda f: citas):
             self.assertIn("10:00", calendar_tool.slots_libres(sabado, 30, 60, 20, "Sesión corporal sin costo"))
             self.assertNotIn("10:00", calendar_tool.slots_libres(sabado, 30, 60, 20, "Sesión facial sin costo"))
+
+    def test_gratis_en_media_hora_ocupa_toda_la_hora(self):
+        # El equipo a veces aparta una Exp. Única a las :30 o de 30 min: igual no cabe otra gratis.
+        for ini, fin in (("17:00", "17:30"), ("17:30", "18:00")):
+            citas = [{"inicio": ini, "fin": fin, "categoria": "faciales", "gratis": True}]
+            with patch.object(calendar_tool, "citas_del_dia", lambda f, c=citas: c):
+                libres = calendar_tool.slots_libres(self.FECHA, 60, 60, 20, "Sesión corporal sin costo")
+            self.assertNotIn("17:00", libres, (ini, fin))
 
     def test_exp_unica_con_costo_no_es_gratis(self):
         r, _ = self._crear("Exp. Única con costo - Facial", [self._evento("Lupita Exp. Única - Corporal")])

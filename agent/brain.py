@@ -87,8 +87,8 @@ HERRAMIENTAS = [
                 },
                 "duracion_min": {
                     "type": "integer",
-                    "description": "Duración de la cita en minutos: 30 si es la cita sin costo "
-                    "(valoración o primera sesión); si no sabes, usa 60.",
+                    "description": "Duración de la cita en minutos. Usa 60 (la cita sin costo también "
+                    "ocupa la hora completa en la agenda).",
                 },
             },
             "required": ["fecha"],
@@ -116,8 +116,8 @@ HERRAMIENTAS = [
                 },
                 "duracion_min": {
                     "type": "integer",
-                    "description": "Duracion en minutos. La cita sin costo siempre dura 30. Si no "
-                    "sabes, usa 60.",
+                    "description": "Duracion en minutos. Usa 60: la cita sin costo también aparta la "
+                    "hora completa.",
                 },
                 "reemplaza_evento_id": {
                     "type": "string",
@@ -517,9 +517,9 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
             # agendaba "Sesión facial sin costo" (regla más estricta) → "ya no está disponible".
             # Por eso: si no dice claramente que es de PAGA, se consulta con la regla de la
             # sesión sin costo (la más estricta) y con la misma duración que usará agendar_cita.
-            # Duración: 30 min SOLO si ya se sabe que es la sesión sin costo; si no se sabe, 60
-            # (lo más largo que podría agendarse), para que la hora ofrecida siempre quepa.
-            dur = 30 if calendar_tool.es_sesion_gratis(servicio_c) else max(60, int(args.get("duracion_min") or 60))
+            # Duración: siempre al menos 60. La sesión sin costo también aparta la HORA COMPLETA
+            # (11-nov, Joel: llegan tarde y con la venta se hacen ~50 min; no caben 2 en una hora).
+            dur = max(60, int(args.get("duracion_min") or 60))
             servicio_c = servicio_para_consultar(servicio_c)
             libres = await asyncio.to_thread(
                 calendar_tool.slots_libres, fecha, dur, 60, 8, servicio_c, telefono or "",
@@ -554,8 +554,10 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
         if nombre == "agendar_cita":
             inicio = datetime.fromisoformat(args["fecha_hora"])
             servicio = args.get("servicio", "").strip() or "Tratamiento"
-            # La cita sin costo dura 30 min aunque el modelo pida otra cosa: bloquea la agenda.
-            duracion = 30 if calendar_tool.es_sesion_gratis(servicio) else int(args.get("duracion_min") or 60)
+            # La cita sin costo aparta la HORA COMPLETA aunque el modelo pida 30: con retraso y
+            # venta se hace ~50 min, y así nadie (ni el equipo) mete otra en la media hora "libre".
+            duracion = max(60, int(args.get("duracion_min") or 60)) if calendar_tool.es_sesion_gratis(servicio) \
+                else int(args.get("duracion_min") or 60)
             res = await asyncio.to_thread(
                 calendar_tool.crear_cita,
                 args.get("nombre", "").strip() or "Clienta",
