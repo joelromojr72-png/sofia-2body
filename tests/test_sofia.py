@@ -984,6 +984,13 @@ class Consola(Base):
         # 12 h dejaba a Sofía callada toda la noche si el equipo contestaba a las 7 pm.
         self.assertLessEqual(main.SILENCIO_TRAS_EQUIPO_MIN, 60)
 
+    async def test_cors_url_nueva_2body_bandeja(self):
+        r = await self.cli.options("/console/estado", headers={
+            "Origin": "https://2body-bandeja.vercel.app", "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-Console-Key"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers.get("access-control-allow-origin"), "https://2body-bandeja.vercel.app")
+
     async def test_cors_de_la_consola(self):
         r = await self.cli.options("/console/chats", headers={
             "Origin": "https://apex-console-two.vercel.app", "Access-Control-Request-Method": "GET",

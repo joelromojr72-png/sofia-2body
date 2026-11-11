@@ -245,7 +245,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://(apex-[a-z0-9-]+\.vercel\.app|localhost(:\d+)?)|http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origin_regex=r"https://((apex|2body)-[a-z0-9-]+\.vercel\.app|localhost(:\d+)?)|http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["X-Console-Key", "Content-Type"],
 )
