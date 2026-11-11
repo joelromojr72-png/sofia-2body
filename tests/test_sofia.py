@@ -944,6 +944,38 @@ class Consola(Base):
         self.assertIn("[Equipo] Hola, soy Ana", hist[-1]["content"])
         self.assertTrue(await memory.equipo_activo_reciente(TEL, 60))
 
+    async def test_acceso_de_gerente_firma_sus_mensajes(self):
+        os.environ["CONSOLE_USUARIOS"] = "clave-blanca=Blanca Velázquez"
+        hb = {"X-Console-Key": "clave-blanca"}
+        try:
+            r = await self.cli.get("/console/estado", headers=hb)
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["usuario"], "Blanca Velázquez")
+            r = await self.cli.get("/console/estado", headers=self.h)
+            self.assertEqual(r.json()["usuario"], "")
+            prov = MagicMock()
+            prov.enviar_mensaje = AsyncMock(return_value=True)
+            await memory.guardar_mensaje(TEL, "user", "¿tienen hoy?")
+            with patch.object(main, "proveedor", prov):
+                r = await self.cli.post("/console/enviar", json={"tel": TEL, "texto": "Sí, a las 5"}, headers=hb)
+            self.assertEqual(r.status_code, 200, r.text)
+            prov.enviar_mensaje.assert_awaited_once_with(TEL, "Sí, a las 5")  # a la clienta le llega limpio
+            self.assertTrue(await memory.equipo_activo_reciente(TEL, 60))
+            with patch("agent.consola._citas", AsyncMock(return_value=[])):
+                r = await self.cli.get("/console/chat", params={"tel": TEL}, headers=self.h)
+            ult = r.json()["mensajes"][-1]
+            self.assertEqual((ult["autor"], ult["por"], ult["texto"]), ("equipo", "Blanca Velázquez", "Sí, a las 5"))
+            r = await self.cli.get("/console/chats", headers=self.h)
+            self.assertEqual(r.json()["chats"][0]["ultimo"]["por"], "Blanca Velázquez")
+            r = await self.cli.post("/console/pausa", json={"tel": TEL, "pausar": True}, headers=hb)
+            from agent import consola
+            async with memory.async_session() as s:
+                self.assertEqual((await s.get(consola.ChatPausa, TEL)).por, "Blanca Velázquez")
+            r = await self.cli.get("/console/chats", headers={"X-Console-Key": "Blanca"})
+            self.assertEqual(r.status_code, 401)
+        finally:
+            os.environ.pop("CONSOLE_USUARIOS", None)
+
     async def test_envio_fallido_avisa(self):
         prov = MagicMock()
         prov.enviar_mensaje = AsyncMock(return_value=False)

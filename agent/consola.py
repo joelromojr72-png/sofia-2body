@@ -13,6 +13,7 @@ Todo pide el encabezado `X-Console-Key` = variable CONSOLE_KEY (no es la ADMIN_K
 
 import asyncio
 import logging
+import hmac
 import os
 from datetime import datetime, timezone
 
@@ -80,24 +81,57 @@ async def chat_pausado(telefono: str) -> bool:
         return False
 
 
-def _autorizar(clave: str | None) -> None:
-    esperada = os.getenv("CONSOLE_KEY") or ""
-    if not esperada or (clave or "") != esperada:
-        raise HTTPException(status_code=401, detail="clave de consola inválida")
+def _usuarios() -> dict[str, str]:
+    """Accesos personales: CONSOLE_USUARIOS = "clave1=Nombre Apellido;clave2=Otro Nombre"."""
+    out: dict[str, str] = {}
+    for parte in (os.getenv("CONSOLE_USUARIOS") or "").split(";"):
+        if "=" in parte:
+            clave, nombre = parte.split("=", 1)
+            if clave.strip() and nombre.strip():
+                out[clave.strip()] = nombre.strip()
+    return out
+
+
+def _autorizar(clave: str | None) -> str:
+    """Valida la clave y regresa quién es ("" = acceso general del equipo)."""
+    clave = (clave or "").strip()
+    general = os.getenv("CONSOLE_KEY") or ""
+    if clave and general and hmac.compare_digest(clave, general):
+        return ""
+    for k, nombre in _usuarios().items():
+        if clave and hmac.compare_digest(clave, k):
+            return nombre
+    raise HTTPException(status_code=401, detail="clave de consola inválida")
+
+
+PREFIJO_EQUIPO = "[Equipo] "
+
+
+def _prefijo(usuario: str) -> str:
+    """Cómo se guarda un mensaje del equipo. Con nombre: "[Equipo · Blanca Velázquez] "."""
+    return f"[Equipo · {usuario}] " if usuario else PREFIJO_EQUIPO
 
 
 def _autor(role: str, texto: str) -> tuple[str, str]:
     """(autor, texto limpio): cliente · sofia · equipo · sistema."""
+    return _autor_por(role, texto)[:2]
+
+
+def _autor_por(role: str, texto: str) -> tuple[str, str, str]:
+    """(autor, texto limpio, quién del equipo lo mandó desde la consola o "")."""
     if role == "user":
-        return "cliente", texto
+        return "cliente", texto, ""
     t = texto or ""
-    if t.startswith("[Equipo] "):
-        return "equipo", t[len("[Equipo] "):]
+    if t.startswith(PREFIJO_EQUIPO):
+        return "equipo", t[len(PREFIJO_EQUIPO):], ""
+    if t.startswith("[Equipo · ") and "] " in t:
+        cab, resto = t.split("] ", 1)
+        return "equipo", resto, cab[len("[Equipo · "):].strip()
     if t.startswith("[Recordatorio automático]") or t.startswith("Hola ") and "te recordamos tu cita" in t:
-        return "sistema", t
+        return "sistema", t, ""
     if t.startswith("[El equipo envió"):
-        return "equipo", t
-    return "sofia", t
+        return "equipo", t, ""
+    return "sofia", t, ""
 
 
 def _iso(dt) -> str | None:
@@ -106,7 +140,7 @@ def _iso(dt) -> str | None:
 
 @router.get("/estado")
 async def estado(x_console_key: str | None = Header(default=None)):
-    _autorizar(x_console_key)
+    usuario = _autorizar(x_console_key)
     from agent import calendar_tool
     from agent.brain import estado_cerebro
     from agent.main import sofia_debe_responder, sofia_pausada
@@ -117,6 +151,7 @@ async def estado(x_console_key: str | None = Header(default=None)):
         "agenda": calendar_tool.calendario_configurado(),
         "cerebro": dict(estado_cerebro) if isinstance(estado_cerebro, dict) else str(estado_cerebro),
         "ahora": ahora().isoformat(),
+        "usuario": usuario,  # "" = acceso general del equipo
     }
 
 
@@ -148,7 +183,7 @@ async def chats(limite: int = 150, x_console_key: str | None = Header(default=No
     salida = []
     for m, n in filas:
         lead = leads.get(m.telefono)
-        autor, texto = _autor(m.role, m.content)
+        autor, texto, por = _autor_por(m.role, m.content)
         salida.append({
             "tel": m.telefono,
             "canal": "messenger" if m.telefono.startswith("msgr:") else "whatsapp",
@@ -156,7 +191,7 @@ async def chats(limite: int = 150, x_console_key: str | None = Header(default=No
             "interes": (lead.interes if lead else "") or "",
             "estado": (lead.estado if lead else "") or "",
             "anuncio": origenes.get(m.telefono, ""),
-            "ultimo": {"id": m.id, "autor": autor, "texto": texto[:220], "ts": _iso(m.timestamp)},
+            "ultimo": {"id": m.id, "autor": autor, "por": por, "texto": texto[:220], "ts": _iso(m.timestamp)},
             "mensajes": n,
             # La última palabra la tiene la clienta: alguien debe contestar.
             "pendiente": autor == "cliente",
@@ -184,8 +219,8 @@ async def chat(tel: str, desde_id: int = 0, x_console_key: str | None = Header(d
         )).scalars().first()
     items = []
     for m in msgs:
-        autor, texto = _autor(m.role, m.content)
-        items.append({"id": m.id, "autor": autor, "texto": texto, "ts": _iso(m.timestamp)})
+        autor, texto, por = _autor_por(m.role, m.content)
+        items.append({"id": m.id, "autor": autor, "por": por, "texto": texto, "ts": _iso(m.timestamp)})
     out = {
         "tel": tel,
         "canal": "messenger" if tel.startswith("msgr:") else "whatsapp",
@@ -222,7 +257,7 @@ async def _citas(tel: str, nombre: str) -> list[dict]:
 @router.post("/enviar")
 async def enviar(request: Request, x_console_key: str | None = Header(default=None)):
     """Manda un mensaje como EQUIPO. Sofía se calla en ese chat (igual que cuando escriben desde el cel)."""
-    _autorizar(x_console_key)
+    usuario = _autorizar(x_console_key)
     datos = (await request.json()) or {}
     tel = (datos.get("tel") or "").strip()
     texto = (datos.get("texto") or "").strip()
@@ -245,19 +280,19 @@ async def enviar(request: Request, x_console_key: str | None = Header(default=No
         raise HTTPException(status_code=409, detail=(
             "No se pudo enviar. Si la clienta no ha escrito en las últimas 24 h, WhatsApp solo "
             "permite plantillas: escríbele desde el celular del spa."))
-    await memory.guardar_mensaje(tel, "assistant", "[Equipo] " + texto)
+    await memory.guardar_mensaje(tel, "assistant", _prefijo(usuario) + texto)
     try:
         await memory.registrar_outbound_equipo(tel)
     except Exception:  # noqa: BLE001
         pass
-    logger.info(f"Consola (equipo) → …{tel[-4:]}: {texto[:60]}")
-    return {"ok": True}
+    logger.info(f"Consola ({usuario or 'equipo'}) → …{tel[-4:]}: {texto[:60]}")
+    return {"ok": True, "por": usuario}
 
 
 @router.post("/pausa")
 async def pausa(request: Request, x_console_key: str | None = Header(default=None)):
     """{tel, pausar: true|false}: apaga o prende a Sofía SOLO en ese chat."""
-    _autorizar(x_console_key)
+    usuario = _autorizar(x_console_key)
     datos = (await request.json()) or {}
     tel = (datos.get("tel") or "").strip()
     if not tel:
@@ -270,7 +305,7 @@ async def pausa(request: Request, x_console_key: str | None = Header(default=Non
             await s.flush()
             actual = None
         if pausar and actual is None:
-            s.add(ChatPausa(telefono=tel, por=(datos.get("por") or "consola")[:60], desde=ahora()))
+            s.add(ChatPausa(telefono=tel, por=(usuario or datos.get("por") or "consola")[:60], desde=ahora()))
         elif not pausar and actual is not None:
             await s.delete(actual)
         await s.commit()

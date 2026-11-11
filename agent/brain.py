@@ -377,7 +377,7 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "solicitud y dígale que el equipo confirma.\n"
             "LEE TODO EL CHAT antes de contestar: lo que ya dijo la clienta (nombre, servicio, "
             "día/hora), lo que TÚ ya ofreciste y lo que prometió el EQUIPO (los mensajes que "
-            "empiezan con [Equipo] los escribió una persona del spa: respétalos, no los "
+            "empiezan con [Equipo] o [Equipo · Nombre] los escribió una persona del spa: respétalos, no los "
             "contradigas, no cambies lo que el equipo acordó y no repitas lo que ya se le dijo). "
             "No vuelvas a preguntar lo que ya contestó ni le ofrezcas dos veces lo mismo. Si "
             "pasaron horas desde tu última oferta (verás [escrito ... h después]), vuelve a "
