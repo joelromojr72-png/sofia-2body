@@ -297,11 +297,12 @@ def es_sesion_gratis(servicio: str) -> bool:
 
 def _una_gratis_por_hora(fecha: date) -> bool:
     """
-    Entre semana solo cabe UNA sesión sin costo por hora en todo el spa. El sábado (dicho por
-    Joel, 5-nov) sí pueden coincidir una facial y una corporal: ahí solo manda la regla de
-    una cabina por servicio.
+    ¿Solo cabe UNA sesión sin costo por hora en todo el spa? NO (Joel, 11-nov): CUALQUIER día
+    pueden coincidir una Exp. Única facial y una corporal a la misma hora. Lo que nunca cabe son
+    dos del MISMO servicio (dos faciales o dos corporales), y eso ya lo cuida la regla de una
+    cabina por servicio. Cada sesión sin costo aparta la hora completa (60 min).
     """
-    return fecha.weekday() != 5
+    return False
 
 
 def _es_cita_gratis(ev: dict) -> bool:

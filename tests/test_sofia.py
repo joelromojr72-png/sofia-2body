@@ -252,7 +252,8 @@ class AnuncioYDuracion(unittest.IsolatedAsyncioTestCase):
 
 
 class UnaGratisALaVez(unittest.TestCase):
-    """Dos sesiones sin costo nunca a la misma hora, aunque una sea facial y la otra corporal."""
+    """Sesiones sin costo (Joel, 11-nov): CUALQUIER día caben una facial y una corporal a la misma
+    hora; nunca dos del MISMO servicio. Cada una aparta la hora completa."""
 
     FECHA = date(2030, 1, 7)  # lunes
 
@@ -279,15 +280,20 @@ class UnaGratisALaVez(unittest.TestCase):
         with patch.object(calendar_tool, "citas_del_dia", lambda f: citas):
             return calendar_tool.slots_libres(self.FECHA, 30, 60, 20, servicio)
 
-    def test_rechaza_gratis_de_otro_servicio(self):
+    def test_gratis_facial_y_corporal_a_la_vez_si(self):
         r, svc = self._crear("Sesión corporal sin costo", [self._evento("Lupita Exp. Única - Facial")])
+        self.assertTrue(r["ok"], r)
+
+    def test_dos_gratis_del_mismo_servicio_no(self):
+        r, svc = self._crear("Sesión facial sin costo", [self._evento("Lupita Exp. Única - Facial")])
         self.assertFalse(r["ok"])
-        self.assertIn("sin costo", r["error"])
         svc.events.return_value.insert.assert_not_called()
 
     def test_valoracion_tambien_cuenta(self):
-        r, _ = self._crear("Valoración facial sin costo", [self._evento("Lupita Exp. Única - Corporal")])
+        r, _ = self._crear("Valoración facial sin costo", [self._evento("Lupita Exp. Única - Facial")])
         self.assertFalse(r["ok"])
+        r, _ = self._crear("Valoración facial sin costo", [self._evento("Lupita Exp. Única - Corporal")])
+        self.assertTrue(r["ok"], r)
 
     def test_gratis_junto_a_pagada_de_otro_servicio_si(self):
         r, _ = self._crear("Sesión corporal sin costo", [self._evento("Tratamiento facial")])
@@ -300,7 +306,8 @@ class UnaGratisALaVez(unittest.TestCase):
     def test_matriz_de_la_regla_de_joel(self):
         # (nueva, ya agendada, ¿se puede?)
         casos = [
-            ("Sesión corporal sin costo", "Lupita Exp. Única - Facial", False),   # dos gratis, nunca
+            ("Sesión corporal sin costo", "Lupita Exp. Única - Facial", True),    # gratis de distinto servicio: sí
+            ("Sesión corporal sin costo", "Lupita Exp. Única - Corporal", False), # dos gratis del mismo: no
             ("Sesión facial sin costo", "Valoración facial sin costo", False),
             ("Tratamiento facial", "Lupita Exp. Única - Corporal", True),         # gratis corporal + facial de paga
             ("Sesión corporal sin costo", "Tratamiento facial", True),
@@ -345,7 +352,7 @@ class UnaGratisALaVez(unittest.TestCase):
         for ini, fin in (("17:00", "17:30"), ("17:30", "18:00")):
             citas = [{"inicio": ini, "fin": fin, "categoria": "faciales", "gratis": True}]
             with patch.object(calendar_tool, "citas_del_dia", lambda f, c=citas: c):
-                libres = calendar_tool.slots_libres(self.FECHA, 60, 60, 20, "Sesión corporal sin costo")
+                libres = calendar_tool.slots_libres(self.FECHA, 60, 60, 20, "Sesión facial sin costo")
             self.assertNotIn("17:00", libres, (ini, fin))
 
     def test_exp_unica_con_costo_no_es_gratis(self):
@@ -355,7 +362,8 @@ class UnaGratisALaVez(unittest.TestCase):
     def test_libres_gratis_corporal_deja_facial_de_paga(self):
         citas = [{"inicio": "10:00", "fin": "10:30", "categoria": "corporales", "gratis": True}]
         self.assertIn("10:00", self._libres("Tratamiento facial", citas))
-        self.assertNotIn("10:00", self._libres("Sesión facial sin costo", citas))
+        self.assertIn("10:00", self._libres("Sesión facial sin costo", citas))
+        self.assertNotIn("10:00", self._libres("Sesión corporal sin costo", citas))
         self.assertNotIn("10:00", self._libres("Tratamiento corporal", citas))
 
     def test_con_costo_no_cuenta_como_gratis(self):
@@ -363,21 +371,22 @@ class UnaGratisALaVez(unittest.TestCase):
         self.assertTrue(r["ok"])
 
     def test_carrera_cede_si_la_otra_gratis_fue_primero(self):
-        r, svc = self._crear("Sesión corporal sin costo", [], [self._evento("Sesión facial sin costo")])
+        r, svc = self._crear("Sesión facial sin costo", [], [self._evento("Sesión facial sin costo")])
         self.assertFalse(r["ok"])
         svc.events.return_value.delete.assert_called_once()
 
     def test_carrera_empate_exacto_solo_cede_una(self):
         hora = "2030-01-01T00:00:01.000Z"
-        menor, _ = self._crear("Sesión corporal sin costo", [], [self._evento("Sesión facial sin costo", id_="aaa", creado=hora)])
-        mayor, _ = self._crear("Sesión corporal sin costo", [], [self._evento("Sesión facial sin costo", id_="zzz", creado=hora)])
+        menor, _ = self._crear("Sesión facial sin costo", [], [self._evento("Sesión facial sin costo", id_="aaa", creado=hora)])
+        mayor, _ = self._crear("Sesión facial sin costo", [], [self._evento("Sesión facial sin costo", id_="zzz", creado=hora)])
         self.assertFalse(menor["ok"])  # "aaa" va antes que "nuestro": cedemos
         self.assertTrue(mayor["ok"])   # "zzz" va después: cede la otra
 
     def test_slots_gratis_no_ofrece_la_hora_de_otra_gratis(self):
         cita = {"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "faciales", "gratis": True}
-        self.assertNotIn("10:00", self._libres("Sesión corporal sin costo", [cita]))
-        self.assertIn("11:00", self._libres("Sesión corporal sin costo", [cita]))
+        self.assertNotIn("10:00", self._libres("Sesión facial sin costo", [cita]))
+        self.assertIn("11:00", self._libres("Sesión facial sin costo", [cita]))
+        self.assertIn("10:00", self._libres("Sesión corporal sin costo", [cita]))
 
     def test_slots_pagada_si_ofrece_esa_hora(self):
         cita = {"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "faciales", "gratis": True}
