@@ -71,7 +71,8 @@ HERRAMIENTAS = [
             "Ofrécele solo horarios que esta herramienta marque libres. Pásale SIEMPRE el "
             "servicio tal como lo vas a agendar (con 'sin costo' si lo es): las citas de OTRO "
             "servicio a la misma hora no estorban (cada servicio tiene su cabina), así salen más "
-            "horarios; pero dos sesiones sin costo no coinciden (salvo el sábado, si son de servicio distinto)."
+            "horarios (también una sesión sin costo facial y una corporal). Si es sin costo, di SIEMPRE "
+            "si es facial o corporal (p. ej. 'Exp. Única facial sin costo')."
         ),
         "input_schema": {
             "type": "object",
@@ -356,8 +357,10 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "ofrécele 1-2 horarios ÚNICAMENTE de los que la herramienta marque libres. NUNCA "
             "ofrezcas, confirmes ni des por buena una hora sin haberla verificado ahí. Hay UNA "
             "sola cabina por servicio (p. ej. una de facial): a la misma hora pueden coincidir un "
-            "facial y un corporal, pero NUNCA dos faciales (ni dos del mismo servicio) ni dos "
-            "sesiones sin costo o valoraciones, aunque una sea facial y la otra corporal (el sábado sí pueden coincidir una facial y una corporal sin costo, nunca dos del mismo servicio). Si el "
+            "facial y un corporal (también si las dos son sin costo), pero NUNCA dos faciales ni dos "
+            "corporales (ni dos del mismo servicio). La sesión sin costo SIEMPRE se agenda diciendo si "
+            "es facial o corporal ('Exp. Única facial sin costo' / 'Exp. Única corporal sin costo'); "
+            "si la clienta no lo ha dicho, pregúntale o recomiéndale una antes de agendar. Si el "
             "horario que pide está lleno para ese servicio, ofrécele otro horario o, si le "
             "interesa, otro servicio en esa hora.\n"
             "REGLA: a cada persona se le regala UNA SOLA sesión sin costo en total (facial O "
@@ -554,6 +557,13 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
         if nombre == "agendar_cita":
             inicio = datetime.fromisoformat(args["fecha_hora"])
             servicio = args.get("servicio", "").strip() or "Tratamiento"
+            if calendar_tool.es_sesion_gratis(servicio) and calendar_tool.categoria_servicio(servicio) not in ("faciales", "corporales"):
+                # Sin decir facial/corporal la cita bloquearía la hora para TODOS los servicios.
+                return (
+                    "NO se agendó: la sesión sin costo debe decir si es FACIAL o CORPORAL. "
+                    "Pregúntale a la clienta cuál prefiere (o recomiéndale una) y vuelve a agendar "
+                    "con 'Exp. Única facial sin costo' o 'Exp. Única corporal sin costo'."
+                )
             # La cita sin costo aparta la HORA COMPLETA aunque el modelo pida 30: con retraso y
             # venta se hace ~50 min, y así nadie (ni el equipo) mete otra en la media hora "libre".
             duracion = max(60, int(args.get("duracion_min") or 60)) if calendar_tool.es_sesion_gratis(servicio) \

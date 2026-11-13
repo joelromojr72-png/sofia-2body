@@ -250,6 +250,15 @@ class AnuncioYDuracion(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._duracion("Paquete facial 12 sesiones"), 60)
         self.assertEqual(await self._duracion("Masaje", 90), 90)
 
+    async def test_sin_costo_debe_decir_facial_o_corporal(self):
+        # 13-nov (Joel): sin decir el servicio, la gratis bloqueaba la hora para TODOS.
+        crear = unittest.mock.Mock(return_value={"ok": True})
+        args = {"nombre": "Ana", "servicio": "Exp. Única sin costo", "fecha_hora": "2026-11-06T11:00"}
+        with patch.object(brain.calendar_tool, "crear_cita", crear):
+            r = await brain._ejecutar_herramienta("agendar_cita", args, TEL)
+        self.assertIn("FACIAL o CORPORAL", r)
+        crear.assert_not_called()
+
 
 class UnaGratisALaVez(unittest.TestCase):
     """Sesiones sin costo (Joel, 11-nov): CUALQUIER día caben una facial y una corporal a la misma
@@ -387,6 +396,16 @@ class UnaGratisALaVez(unittest.TestCase):
         self.assertNotIn("10:00", self._libres("Sesión facial sin costo", [cita]))
         self.assertIn("11:00", self._libres("Sesión facial sin costo", [cita]))
         self.assertIn("10:00", self._libres("Sesión corporal sin costo", [cita]))
+
+    def test_sin_tope_entre_servicios_distintos(self):
+        # 13-nov (Joel): no hay tope global; masaje + facial + corporal a la vez sí caben.
+        r, _ = self._crear("Tratamiento corporal", [self._evento("Masaje descontracturante"),
+                                                    self._evento("Limpieza facial", id_="otro")])
+        self.assertTrue(r["ok"], r)
+        citas = [{"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "masajes"},
+                 {"inicio": "10:00", "fin": "11:00", "titulo": "y", "categoria": "faciales"}]
+        self.assertIn("10:00", self._libres("Tratamiento corporal", citas))
+        self.assertNotIn("10:00", self._libres("Limpieza facial", citas))
 
     def test_slots_pagada_si_ofrece_esa_hora(self):
         cita = {"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "faciales", "gratis": True}

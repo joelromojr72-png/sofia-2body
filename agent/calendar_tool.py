@@ -239,8 +239,10 @@ def _categoria_evento(cal_id: str, ev: dict, explicita: bool = False) -> str | N
     return _PRINCIPAL_POR_DEFECTO if creador == CALENDAR_ID.lower() else None
 
 
-# Máximo de citas a la MISMA hora en todo el spa (aunque sean de servicios distintos).
-MAX_CITAS_SIMULTANEAS = int(os.getenv("MAX_CITAS_SIMULTANEAS") or "2")
+# Tope opcional de citas a la MISMA hora en todo el spa. 0 = sin tope (Joel, 13-nov): servicios
+# distintos se empalman sin límite (un descontracturante, un facial y un corporal a la vez sí);
+# lo único que choca es el MISMO servicio, porque hay una cabina por servicio.
+MAX_CITAS_SIMULTANEAS = int(os.getenv("MAX_CITAS_SIMULTANEAS") or "0")
 
 
 def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:
@@ -307,8 +309,8 @@ def _una_gratis_por_hora(fecha: date) -> bool:
 
 def _es_cita_gratis(ev: dict) -> bool:
     """
-    ¿Esta cita ya agendada es una sesión sin costo (Exp. Única / valoración)? Regla de 2Body:
-    solo UNA a la vez en todo el spa, aunque una sea facial y la otra corporal. Se mira el
+    ¿Esta cita ya agendada es una sesión sin costo (Exp. Única / valoración)? Regla de 2Body
+    (13-nov): pueden coincidir una facial y una corporal, nunca dos del mismo servicio. Se mira el
     título y el 'Servicio:', no las notas, que pueden mencionar una valoración de paso.
     """
     m = re.search(r"Servicio:\s*(.+)", ev.get("description", "") or "")
@@ -569,7 +571,7 @@ def slots_libres(
     """
     Horarios de inicio REALMENTE LIBRES de un día para ese servicio, para que Sofía ofrezca
     solo huecos que no chocan. Una cita de OTRO servicio a la misma hora no estorba (se
-    empalman), salvo que ambas sean sin costo; sin servicio, cualquier cita ocupa el horario.
+    empalman, también dos sin costo facial + corporal); sin servicio, cualquier cita ocupa el horario.
     Solo horas EN PUNTO: la clínica agenda cada hora (9:00, 10:00, 11:00...).
     """
     cat_nueva = categoria_servicio(servicio) if servicio else None
@@ -610,7 +612,8 @@ def slots_libres(
         ini_t, fin_t = t.time(), (t + d).time()
         en_futuro = t >= ahora + timedelta(minutes=1)
         choca = any(ini_t < of and fin_t > oi for (oi, of) in ocupadas) or (
-            sum(1 for (oi, of) in todas if ini_t < of and fin_t > oi) >= MAX_CITAS_SIMULTANEAS
+            MAX_CITAS_SIMULTANEAS
+            and sum(1 for (oi, of) in todas if ini_t < of and fin_t > oi) >= MAX_CITAS_SIMULTANEAS
         )
         if en_futuro and not choca:
             libres.append(t.strftime("%H:%M"))
@@ -795,7 +798,6 @@ def crear_cita(
     # Se revisa el traslape contra TODOS los calendarios de servicio:
     #   • Traslape de ESTA MISMA clienta → ya tenía cita: NO duplicamos (idempotente).
     #   • Traslape de OTRA clienta del MISMO servicio (o de servicio desconocido) → ocupado.
-    #   • Traslape de OTRA clienta con sesión sin costo, si esta también lo es → ocupado.
     #   • Traslape de OTRA clienta de OTRO servicio → se empalma sin problema.
     existentes = [(c, e) for c, e in _eventos_dia_todos(svc, inicio.date())  # [(cal_id, evento), ...]
                   if not (vieja_id and e.get("id") == vieja_id)]
@@ -830,7 +832,7 @@ def crear_cita(
                     "link": ev.get("htmlLink", ""),
                 }
             simultaneas += 1
-            if simultaneas >= MAX_CITAS_SIMULTANEAS:
+            if MAX_CITAS_SIMULTANEAS and simultaneas >= MAX_CITAS_SIMULTANEAS:
                 logger.info(f"Tope de {MAX_CITAS_SIMULTANEAS} citas simultáneas: se rechaza {inicio.isoformat()}")
                 return {
                     "ok": False,
@@ -936,7 +938,7 @@ def crear_cita(
                 antes = (otro.get("created", ""), otro.get("id", "")) < (nuestro_created, nuestro_id)
                 previas += 1 if antes else 0
                 dos_gratis = nueva_gratis and _es_cita_gratis(otro) and not es_bloqueo(otro)
-                if not dos_gratis and not _choca_evento(cat_nueva, _cal, otro) and previas < MAX_CITAS_SIMULTANEAS:
+                if not dos_gratis and not _choca_evento(cat_nueva, _cal, otro) and (not MAX_CITAS_SIMULTANEAS or previas < MAX_CITAS_SIMULTANEAS):
                     continue  # otro servicio y sin pasar el tope: se puede empalmar
                 if antes:
                     try:
