@@ -293,6 +293,30 @@ async def leads_report(key: str = ""):
     return await reporte_leads()
 
 
+@app.post("/ghl/importar")
+async def ghl_importar(tareas: BackgroundTasks, key: str = "", probar: bool = True):
+    """Carga a GHL las clientas del historial. probar=true solo cuenta (no sube nada)."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from collections import Counter
+    from agent.memory import clientas_para_ghl
+    clientas = await clientas_para_ghl()
+    plan = dict(Counter(ghl.etapa_de(c) or "omitidas_opt_out" for c in clientas))
+    if probar or not ghl.activo() or ghl.importacion.get("corriendo"):
+        return {"total": len(clientas), "plan": plan, "activo": ghl.activo(), "estado": ghl.importacion}
+    tareas.add_task(ghl.importar_historial, clientas)
+    return {"total": len(clientas), "plan": plan, "iniciada": True}
+
+
+@app.get("/ghl/importar")
+async def ghl_importar_estado(key: str = ""):
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    return ghl.importacion
+
+
 @app.get("/anuncios")
 async def anuncios_report(key: str = "", dias: int = 60):
     """

@@ -1134,3 +1134,12 @@ class GHLPipeline(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"GHL_TOKEN": "", "GHL_LOCATION_ID": ""}):
             self.assertFalse(ghl.activo())
             await ghl.sincronizar("5217710000003", "nuevo")
+
+
+class GHLEtapaHistorial(unittest.TestCase):
+    def test_etapa_de(self):
+        from agent import ghl
+        self.assertEqual(ghl.etapa_de({"estado": "agendado", "contestada": True}), "agendada")
+        self.assertEqual(ghl.etapa_de({"estado": "activo", "contestada": True}), "contactada")
+        self.assertEqual(ghl.etapa_de({"estado": "activo", "contestada": False}), "nuevo")
+        self.assertIsNone(ghl.etapa_de({"estado": "opt_out", "contestada": True}))

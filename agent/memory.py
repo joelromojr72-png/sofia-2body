@@ -895,3 +895,34 @@ async def reporte_leads() -> dict:
         "agendaron": [_d(l) for l in leads if l.estado == "agendado"],
         "opt_out": [_d(l) for l in leads if l.estado == "opt_out"],
     }
+
+
+async def clientas_para_ghl() -> list[dict]:
+    """
+    Todas las clientas de WhatsApp que Sofía tiene en su historial (tabla de leads + chats
+    sin lead), con lo necesario para cargarlas a GHL: nombre, estado, si Sofía ya le contestó
+    y cuándo escribió por última vez.
+    """
+    async with async_session() as s:
+        leads = {l.telefono: l for (l,) in (await s.execute(select(Lead))).all()}
+        r = await s.execute(text(
+            "SELECT telefono, MAX(timestamp) AS ultimo, "
+            "SUM(CASE WHEN role = 'assistant' THEN 1 ELSE 0 END) AS respuestas "
+            "FROM mensajes GROUP BY telefono"
+        ))
+        chats = {t: (u, int(n or 0)) for t, u, n in r.all()}
+    out = []
+    for tel in set(leads) | set(chats):
+        if not tel or not tel.isdigit():
+            continue  # Messenger (msgr:...) y basura: GHL necesita un teléfono
+        l = leads.get(tel)
+        ultimo, respuestas = chats.get(tel, (None, 0))
+        out.append({
+            "telefono": tel,
+            "nombre": (l.nombre if l else "") or "",
+            "estado": (l.estado if l else "activo") or "activo",
+            "contestada": respuestas > 0 or bool(l and l.last_outbound),
+            "ultimo": ultimo or (l.last_inbound if l else None),
+        })
+    out.sort(key=lambda x: x["ultimo"] or datetime.min.replace(tzinfo=timezone.utc))
+    return out

@@ -172,3 +172,42 @@ def programar(telefono: str, etapa: str, nombre: str = "", nota: str = "") -> No
         return
     _tareas.add(t)
     t.add_done_callback(_tareas.discard)
+
+
+# ── Carga del historial (una vez) ────────────────────────────────────────────
+importacion: dict = {"corriendo": False}
+
+
+def etapa_de(c: dict) -> str | None:
+    """Etapa en GHL de una clienta del historial. Las que pidieron no ser contactadas no se cargan."""
+    if c.get("estado") == "opt_out":
+        return None
+    if c.get("estado") == "agendado":
+        return "agendada"
+    return "contactada" if c.get("contestada") else "nuevo"
+
+
+async def importar_historial(clientas: list[dict], pausa: float = 0.4) -> None:
+    """Sube a GHL cada clienta del historial a su etapa (sin regresar las que ya estén más adelante)."""
+    from collections import Counter
+    cuenta: Counter = Counter()
+    importacion.update(corriendo=True, total=len(clientas), hechas=0, errores=0, por_etapa={})
+    try:
+        for c in clientas:
+            etapa = etapa_de(c)
+            if etapa:
+                try:
+                    await sincronizar(c["telefono"], etapa, c.get("nombre", ""))
+                    cuenta[etapa] += 1
+                except Exception as e:  # noqa: BLE001
+                    importacion["errores"] += 1
+                    logger.warning(f"[GHL] importación: falló {c['telefono']}: {e}")
+                    await asyncio.sleep(3)  # por si es límite de GHL
+                await asyncio.sleep(pausa)
+            else:
+                cuenta["omitidas_opt_out"] += 1
+            importacion["hechas"] += 1
+            importacion["por_etapa"] = dict(cuenta)
+    finally:
+        importacion["corriendo"] = False
+        logger.info(f"[GHL] importación terminada: {importacion}")
