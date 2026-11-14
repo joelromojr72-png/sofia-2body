@@ -33,6 +33,8 @@ ETAPAS = {
     "contactada": "contactada",
     "agendada": "valoracion agendada",
 }
+# Etapas que NO mueve Sofía pero sí lee (ventas para Meta).
+ETAPAS_LECTURA = {"vendido": "paquete vendido", "tratamiento": "en tratamiento"}
 
 _pipeline: dict | None = None            # {"id": ..., "etapas": {clave: (id, posicion)}, "pos": {id: posicion}}
 _opps: dict[str, tuple[str, int]] = {}   # telefono → (id de la oportunidad, posición de su etapa)
@@ -76,7 +78,7 @@ async def _cargar_pipeline(c: httpx.AsyncClient) -> dict:
             continue
         pos = {s["id"]: int(s.get("position", 0)) for s in p.get("stages", [])}
         etapas = {}
-        for clave, prefijo in ETAPAS.items():
+        for clave, prefijo in {**ETAPAS, **ETAPAS_LECTURA}.items():
             s = next((s for s in p.get("stages", []) if _norm(s.get("name", "")).startswith(prefijo)), None)
             if s:
                 etapas[clave] = (s["id"], int(s.get("position", 0)))
@@ -97,6 +99,22 @@ async def _contacto(c: httpx.AsyncClient, telefono: str, nombre: str) -> str:
     r = await c.post("/contacts/upsert", json=cuerpo)
     r.raise_for_status()
     return r.json()["contact"]["id"]
+
+
+async def _anuncio(telefono: str) -> str:
+    """Título del anuncio por el que llegó la clienta ("" si no llegó por anuncio)."""
+    try:
+        from agent.memory import titulo_anuncio
+        return (await titulo_anuncio(telefono) or "").strip()[:80]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _etiquetar_anuncio(c: httpx.AsyncClient, contacto_id: str, anuncio: str) -> None:
+    try:
+        await c.post(f"/contacts/{contacto_id}/tags", json={"tags": ["anuncio", f"anuncio: {anuncio[:60]}"]})
+    except httpx.HTTPError:
+        pass
 
 
 async def _buscar_opp(c: httpx.AsyncClient, pipe: dict, contacto_id: str) -> tuple[str, int] | None:
@@ -127,11 +145,15 @@ async def sincronizar(telefono: str, etapa: str, nombre: str = "", nota: str = "
             # Si ya la conocemos no se busca (la búsqueda de GHL tarda en ver tarjetas recién creadas).
             opp = conocida or await _buscar_opp(c, pipe, contacto_id)
             titulo = nombre or f"WhatsApp +{telefono}"
+            anuncio = "" if conocida else await _anuncio(telefono)
+            fuente = f"Anuncio: {anuncio}" if anuncio else "WhatsApp (Sofía)"
+            if anuncio:
+                await _etiquetar_anuncio(c, contacto_id, anuncio)
             if not opp:
                 r = await c.post("/opportunities/", json={
                     "pipelineId": pipe["id"], "locationId": _loc(), "name": titulo,
                     "pipelineStageId": etapa_id, "status": "open", "contactId": contacto_id,
-                    "source": "WhatsApp (Sofía)",
+                    "source": fuente,
                 })
                 r.raise_for_status()
                 _opps[telefono] = (r.json()["opportunity"]["id"], etapa_pos)
@@ -143,6 +165,8 @@ async def sincronizar(telefono: str, etapa: str, nombre: str = "", nota: str = "
                     cambios["pipelineStageId"] = etapa_id
                 if nombre:
                     cambios["name"] = nombre
+                if anuncio:
+                    cambios["source"] = fuente
                 if cambios:
                     r = await c.put(f"/opportunities/{opp_id}", json=cambios)
                     r.raise_for_status()
@@ -214,3 +238,91 @@ async def importar_historial(clientas: list[dict], pausa: float = 0.8) -> None:
     finally:
         importacion["corriendo"] = False
         logger.info(f"[GHL] importación terminada: {importacion}")
+
+
+# ── Ventas de GHL → Meta ─────────────────────────────────────────────────────
+# Cuando el equipo mueve una tarjeta a "Paquete vendido" (o "En tratamiento"), y la clienta
+# llegó por un anuncio de clic a WhatsApp (tenemos su ctwa_clid), se le reporta a Meta la
+# Compra con el valor de la tarjeta. Mismo event_id que la atribución por agenda
+# ("venta-<tel10>"), así Meta no la cuenta doble. Se revisa cada pocos minutos (sin webhook).
+VALOR_DEFECTO = int(os.getenv("VALOR_VENTA_DEFECTO") or "5000")
+GHL_VENTAS_CADA_MIN = float(os.getenv("GHL_VENTAS_CADA_MIN") or "15")
+
+
+async def _vendidas(c: httpx.AsyncClient, pipe: dict) -> list[dict]:
+    out = []
+    for clave in ("vendido", "tratamiento"):
+        if clave not in pipe["etapas"]:
+            continue
+        pagina = 1
+        while pagina <= 20:
+            r = await c.get("/opportunities/search", params={
+                "location_id": _loc(), "pipeline_id": pipe["id"],
+                "pipeline_stage_id": pipe["etapas"][clave][0], "limit": 100, "page": pagina,
+            })
+            r.raise_for_status()
+            ops = r.json().get("opportunities", [])
+            for o in ops:
+                tel = "".join(ch for ch in ((o.get("contact") or {}).get("phone") or "") if ch.isdigit())
+                if tel:
+                    out.append({"telefono": tel, "nombre": o.get("name", ""),
+                                "valor": int(float(o.get("monetaryValue") or 0)) or VALOR_DEFECTO})
+            if len(ops) < 100:
+                break
+            pagina += 1
+    return out
+
+
+async def ciclo_ventas_ghl() -> dict:
+    from sqlalchemy import select
+
+    from agent import atribucion
+    from agent.memory import OrigenAnuncio, async_session
+
+    async with _cliente() as c:
+        pipe = await _cargar_pipeline(c)
+        vendidas = await _vendidas(c, pipe)
+    reportadas = sin_anuncio = 0
+    async with async_session() as s:
+        for v in vendidas:
+            t10 = v["telefono"][-10:]
+            origen = (await s.execute(
+                select(OrigenAnuncio).where(OrigenAnuncio.telefono.like(f"%{t10}"), OrigenAnuncio.ctwa_clid != "")
+                .order_by(OrigenAnuncio.creado_en.desc()).limit(1)
+            )).scalars().first()
+            if not origen:
+                sin_anuncio += 1
+                continue
+            fila = await s.get(atribucion.VentaAnuncio, origen.telefono)
+            if fila and fila.reportada_meta:
+                continue
+            if fila is None:
+                fila = atribucion.VentaAnuncio(telefono=origen.telefono)
+                s.add(fila)
+            fila.nombre, fila.servicio, fila.valor = v["nombre"][:160], "Paquete (GHL)", v["valor"]
+            fila.ad_id, fila.ad_titulo, fila.ctwa_clid = origen.ad_id, origen.titulo, origen.ctwa_clid
+            fila.llego_en = origen.creado_en
+            ok, detalle = await atribucion.reportar_compra_meta(fila)
+            fila.respuesta_meta = detalle
+            if ok:
+                fila.reportada_meta = True
+                reportadas += 1
+                logger.info(f"[GHL→Meta] Compra reportada: {origen.telefono} ${v['valor']} (anuncio {origen.ad_id})")
+            else:
+                logger.warning(f"[GHL→Meta] Meta no aceptó la compra de {origen.telefono}: {detalle}")
+        await s.commit()
+    return {"vendidas_en_ghl": len(vendidas), "reportadas_meta": reportadas, "sin_anuncio": sin_anuncio}
+
+
+async def loop_ventas_ghl() -> None:
+    if not activo():
+        return
+    logger.info(f"[GHL→Meta] ventas del pipeline cada {GHL_VENTAS_CADA_MIN:g} min")
+    while True:
+        try:
+            r = await ciclo_ventas_ghl()
+            if r["reportadas_meta"]:
+                logger.info(f"[GHL→Meta] {r}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[GHL→Meta] ciclo falló: {e}")
+        await asyncio.sleep(GHL_VENTAS_CADA_MIN * 60)

@@ -1129,6 +1129,16 @@ class GHLPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([c for c in self.llamadas if c[0] == "PUT"])
         self.assertFalse([c for c in self.llamadas if c[:2] == ("POST", "/opportunities/")])
 
+    async def test_tarjeta_dice_de_que_anuncio_llego(self):
+        from agent import ghl
+        a, b = self._mock()
+        with a, b, patch.object(ghl, "_anuncio", AsyncMock(return_value="Buen Fin faciales")):
+            await ghl.sincronizar("5217710000004", "nuevo")
+        creada = [c for c in self.llamadas if c[:2] == ("POST", "/opportunities/")][0]
+        self.assertEqual(creada[2]["source"], "Anuncio: Buen Fin faciales")
+        tags = [c for c in self.llamadas if c[1].endswith("/tags")][0]
+        self.assertIn("anuncio: Buen Fin faciales", tags[2]["tags"])
+
     async def test_sin_llave_no_hace_nada(self):
         from agent import ghl
         with patch.dict(os.environ, {"GHL_TOKEN": "", "GHL_LOCATION_ID": ""}):

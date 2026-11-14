@@ -223,6 +223,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(followup.loop_seguimiento(proveedor))
         # Atribución: detecta ventas de clientas que llegaron por anuncio y las reporta a Meta.
         asyncio.create_task(atribucion.loop_ventas())
+        # Ventas marcadas en GHL ("Paquete vendido") → Compra en Meta.
+        asyncio.create_task(ghl.loop_ventas_ghl())
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
 
@@ -307,6 +309,15 @@ async def ghl_importar(tareas: BackgroundTasks, key: str = "", probar: bool = Tr
         return {"total": len(clientas), "plan": plan, "activo": ghl.activo(), "estado": ghl.importacion}
     tareas.add_task(ghl.importar_historial, clientas)
     return {"total": len(clientas), "plan": plan, "iniciada": True}
+
+
+@app.post("/ghl/ventas")
+async def ghl_ventas(key: str = ""):
+    """Corre ya la revisión de ventas del pipeline de GHL (normalmente corre sola)."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    return await ghl.ciclo_ventas_ghl()
 
 
 @app.get("/ghl/importar")
