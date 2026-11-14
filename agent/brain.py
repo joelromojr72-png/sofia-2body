@@ -589,6 +589,12 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
                     )
                 except Exception:  # noqa: BLE001
                     pass
+                if not res.get("duplicada"):
+                    from agent import ghl
+                    ghl.programar(
+                        telefono or "", "agendada", args.get("nombre", "").strip(),
+                        f"Sofía agendó: {servicio} — {inicio.strftime('%d/%m/%Y %H:%M')}",
+                    )
                 if res.get("duplicada"):
                     return (
                         f"OJO: la clienta YA TENÍA una cita para {res['cuando']} (NO se creó otra, "

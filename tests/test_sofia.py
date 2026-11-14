@@ -1077,3 +1077,60 @@ class ConsolaEstado(Consola):
         r = await self.cli.get("/console/estado", headers=self.h)
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIn("sofia_turno", r.json())
+
+
+class GHLPipeline(unittest.IsolatedAsyncioTestCase):
+    """13-nov: Sofía refleja a cada clienta en el pipeline 'Ventas 2Body' de GHL y nunca la regresa."""
+
+    def _mock(self, etapa_existente=None):
+        import httpx
+        from agent import ghl
+        ghl._pipeline = None
+        ghl._opps.clear()
+        self.llamadas = []
+        etapas = [{"id": f"s{i}", "name": n, "position": i} for i, n in enumerate(
+            ["Lead nuevo", "Contactada por WhatsApp", "Valoracion agendada", "Valoracion realizada", "Paquete vendido"])]
+
+        def handler(req):
+            self.llamadas.append((req.method, req.url.path, json.loads(req.content or b"{}")))
+            if req.url.path == "/opportunities/pipelines":
+                return httpx.Response(200, json={"pipelines": [{"id": "p1", "name": "Ventas 2Body", "stages": etapas}]})
+            if req.url.path == "/contacts/upsert":
+                return httpx.Response(200, json={"contact": {"id": "c1"}})
+            if req.url.path == "/opportunities/search":
+                ops = [{"id": "o1", "status": "open", "pipelineStageId": etapa_existente}] if etapa_existente else []
+                return httpx.Response(200, json={"opportunities": ops})
+            if req.url.path == "/opportunities/" and req.method == "POST":
+                return httpx.Response(200, json={"opportunity": {"id": "o1"}})
+            return httpx.Response(200, json={})
+
+        transporte = httpx.MockTransport(handler)
+        return patch.object(ghl, "_cliente", lambda: httpx.AsyncClient(base_url=ghl.API, transport=transporte)), \
+            patch.dict(os.environ, {"GHL_TOKEN": "x", "GHL_LOCATION_ID": "loc"})
+
+    async def test_crea_tarjeta_y_avanza(self):
+        from agent import ghl
+        a, b = self._mock()
+        with a, b:
+            await ghl.sincronizar("5217710000001", "nuevo")
+            await ghl.sincronizar("5217710000001", "nuevo")  # ya está: no vuelve a llamar
+            await ghl.sincronizar("5217710000001", "agendada", "Ana López")
+        creadas = [c for c in self.llamadas if c[:2] == ("POST", "/opportunities/")]
+        self.assertEqual(len(creadas), 1)
+        self.assertEqual(creadas[0][2]["pipelineStageId"], "s0")
+        movidas = [c for c in self.llamadas if c[0] == "PUT"]
+        self.assertEqual(movidas[-1][2], {"pipelineStageId": "s2", "name": "Ana López"})
+
+    async def test_no_regresa_si_el_equipo_ya_la_avanzo(self):
+        from agent import ghl
+        a, b = self._mock(etapa_existente="s4")  # Paquete vendido
+        with a, b:
+            await ghl.sincronizar("5217710000002", "contactada")
+        self.assertFalse([c for c in self.llamadas if c[0] == "PUT"])
+        self.assertFalse([c for c in self.llamadas if c[:2] == ("POST", "/opportunities/")])
+
+    async def test_sin_llave_no_hace_nada(self):
+        from agent import ghl
+        with patch.dict(os.environ, {"GHL_TOKEN": "", "GHL_LOCATION_ID": ""}):
+            self.assertFalse(ghl.activo())
+            await ghl.sincronizar("5217710000003", "nuevo")

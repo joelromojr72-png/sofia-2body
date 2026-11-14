@@ -23,6 +23,7 @@ from agent import atribucion, followup
 from agent.consola import chat_pausado
 from agent.consola import router as consola_router
 from agent.brain import estado_cerebro, generar_respuesta
+from agent import ghl
 from agent.memory import (
     guardar_mensaje,
     inicializar_db,
@@ -712,6 +713,7 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
             # enviarle una plantilla de WhatsApp a un id que no es un teléfono.
             if not es_messenger:
                 await registrar_inbound_lead(msg.telefono, msg.texto)
+                ghl.programar(msg.telefono, "nuevo")  # tarjeta en GHL (segundo plano)
 
             # El historial se lee ANTES de guardar el mensaje actual: brain.py agrega
             # el mensaje nuevo al final, y asi no queda duplicado.
@@ -751,6 +753,8 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
             if es_respuesta_real:
                 await guardar_mensaje(msg.telefono, "user", msg.texto)
                 await guardar_mensaje(msg.telefono, "assistant", respuesta)
+                if not es_messenger:
+                    ghl.programar(msg.telefono, "contactada")
 
             logger.info(f"Respuesta enviada a {msg.telefono}: {respuesta}")
 
