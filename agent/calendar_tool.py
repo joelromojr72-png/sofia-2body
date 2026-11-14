@@ -239,10 +239,10 @@ def _categoria_evento(cal_id: str, ev: dict, explicita: bool = False) -> str | N
     return _PRINCIPAL_POR_DEFECTO if creador == CALENDAR_ID.lower() else None
 
 
-# Tope opcional de citas a la MISMA hora en todo el spa. 0 = sin tope (Joel, 13-nov): servicios
-# distintos se empalman sin límite (un descontracturante, un facial y un corporal a la vez sí);
-# lo único que choca es el MISMO servicio, porque hay una cabina por servicio.
-MAX_CITAS_SIMULTANEAS = int(os.getenv("MAX_CITAS_SIMULTANEAS") or "0")
+# Tope de citas a la MISMA hora en todo el spa (Joel, 13-nov): máximo 2, y de servicios
+# DISTINTOS (p. ej. un descontracturante y un facial), porque no hay más personal. Dos del
+# mismo servicio nunca (una cabina por servicio). 0 = sin tope.
+MAX_CITAS_SIMULTANEAS = int(os.getenv("MAX_CITAS_SIMULTANEAS") or "2")
 
 
 def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:

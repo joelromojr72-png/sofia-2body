@@ -397,15 +397,17 @@ class UnaGratisALaVez(unittest.TestCase):
         self.assertIn("11:00", self._libres("Sesión facial sin costo", [cita]))
         self.assertIn("10:00", self._libres("Sesión corporal sin costo", [cita]))
 
-    def test_sin_tope_entre_servicios_distintos(self):
-        # 13-nov (Joel): no hay tope global; masaje + facial + corporal a la vez sí caben.
+    def test_maximo_dos_de_servicios_distintos(self):
+        # 13-nov (Joel): por personal caben máximo 2 a la vez, y de servicios distintos.
+        r, _ = self._crear("Limpieza facial", [self._evento("Masaje descontracturante")])
+        self.assertTrue(r["ok"], r)
         r, _ = self._crear("Tratamiento corporal", [self._evento("Masaje descontracturante"),
                                                     self._evento("Limpieza facial", id_="otro")])
-        self.assertTrue(r["ok"], r)
-        citas = [{"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "masajes"},
-                 {"inicio": "10:00", "fin": "11:00", "titulo": "y", "categoria": "faciales"}]
-        self.assertIn("10:00", self._libres("Tratamiento corporal", citas))
-        self.assertNotIn("10:00", self._libres("Limpieza facial", citas))
+        self.assertFalse(r["ok"])
+        uno = [{"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "masajes"}]
+        dos = uno + [{"inicio": "10:00", "fin": "11:00", "titulo": "y", "categoria": "faciales"}]
+        self.assertIn("10:00", self._libres("Limpieza facial", uno))
+        self.assertNotIn("10:00", self._libres("Tratamiento corporal", dos))
 
     def test_slots_pagada_si_ofrece_esa_hora(self):
         cita = {"inicio": "10:00", "fin": "11:00", "titulo": "x", "categoria": "faciales", "gratis": True}

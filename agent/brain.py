@@ -358,7 +358,7 @@ def _instrucciones_agenda(hay_agenda: bool) -> str:
             "ofrezcas, confirmes ni des por buena una hora sin haberla verificado ahí. Hay UNA "
             "sola cabina por servicio (p. ej. una de facial): a la misma hora pueden coincidir un "
             "facial y un corporal (también si las dos son sin costo), pero NUNCA dos faciales ni dos "
-            "corporales (ni dos del mismo servicio). La sesión sin costo SIEMPRE se agenda diciendo si "
+            "corporales (ni dos del mismo servicio), y máximo 2 citas a la misma hora en todo el spa. La sesión sin costo SIEMPRE se agenda diciendo si "
             "es facial o corporal ('Exp. Única facial sin costo' / 'Exp. Única corporal sin costo'); "
             "si la clienta no lo ha dicho, pregúntale o recomiéndale una antes de agendar. Si el "
             "horario que pide está lleno para ese servicio, ofrécele otro horario o, si le "
