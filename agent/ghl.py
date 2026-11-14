@@ -187,7 +187,7 @@ def etapa_de(c: dict) -> str | None:
     return "contactada" if c.get("contestada") else "nuevo"
 
 
-async def importar_historial(clientas: list[dict], pausa: float = 0.4) -> None:
+async def importar_historial(clientas: list[dict], pausa: float = 0.8) -> None:
     """Sube a GHL cada clienta del historial a su etapa (sin regresar las que ya estén más adelante)."""
     from collections import Counter
     cuenta: Counter = Counter()
@@ -196,13 +196,16 @@ async def importar_historial(clientas: list[dict], pausa: float = 0.4) -> None:
         for c in clientas:
             etapa = etapa_de(c)
             if etapa:
-                try:
-                    await sincronizar(c["telefono"], etapa, c.get("nombre", ""))
-                    cuenta[etapa] += 1
-                except Exception as e:  # noqa: BLE001
-                    importacion["errores"] += 1
-                    logger.warning(f"[GHL] importación: falló {c['telefono']}: {e}")
-                    await asyncio.sleep(3)  # por si es límite de GHL
+                for intento in range(3):
+                    try:
+                        await sincronizar(c["telefono"], etapa, c.get("nombre", ""))
+                        cuenta[etapa] += 1
+                        break
+                    except Exception as e:  # noqa: BLE001 — 429 = límite de GHL: esperar y reintentar
+                        if intento == 2:
+                            importacion["errores"] += 1
+                            logger.warning(f"[GHL] importación: falló {c['telefono']}: {e}")
+                        await asyncio.sleep(10 * (intento + 1))
                 await asyncio.sleep(pausa)
             else:
                 cuenta["omitidas_opt_out"] += 1
