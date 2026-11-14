@@ -281,6 +281,7 @@ class UnaGratisALaVez(unittest.TestCase):
         lecturas = [existentes, recheck if recheck is not None else existentes]
         with patch.object(calendar_tool, "_obtener_servicio", lambda: svc), \
              patch.object(calendar_tool, "sesion_gratis_previa", lambda *a, **k: None), \
+             patch.object(calendar_tool, "dia_cerrado", lambda f: False), \
              patch.object(calendar_tool, "_eventos_dia_todos", side_effect=lecturas):
             inicio = _dt(2030, 1, 7, 10, 0, tzinfo=calendar_tool.TZ)
             return calendar_tool.crear_cita("Ana Ruiz", tel, servicio, inicio, 30), svc
@@ -1153,3 +1154,25 @@ class GHLEtapaHistorial(unittest.TestCase):
         self.assertEqual(ghl.etapa_de({"estado": "activo", "contestada": True}), "contactada")
         self.assertEqual(ghl.etapa_de({"estado": "activo", "contestada": False}), "nuevo")
         self.assertIsNone(ghl.etapa_de({"estado": "opt_out", "contestada": True}))
+
+
+class DiasCerrados(unittest.TestCase):
+    """14-nov (Joel): el lunes 16-nov no se trabaja; el equipo marca feriados en el calendario."""
+
+    def setUp(self):
+        calendar_tool._cache_cerrado.clear()
+
+    def test_variable_dias_cerrados(self):
+        with patch.dict(os.environ, {"DIAS_CERRADOS": "2030-01-07"}):
+            self.assertIsNone(calendar_tool.horario_dia(date(2030, 1, 7)))
+            self.assertIsNotNone(calendar_tool.horario_dia(date(2030, 1, 8)))
+
+    def test_evento_de_dia_completo_cerrado(self):
+        ev = {"summary": "CERRADO - Día de la Revolución", "start": {"date": "2030-01-07"}}
+        cita = {"summary": "Facial cerrado", "start": {"dateTime": "2030-01-08T10:00:00-06:00"}}
+        with patch.dict(os.environ, {"DIAS_CERRADOS": ""}), \
+             patch.object(calendar_tool, "_obtener_servicio", lambda: MagicMock()), \
+             patch.object(calendar_tool, "_eventos_dia_todos",
+                          lambda svc, f: [("cal", ev)] if f == date(2030, 1, 7) else [("cal", cita)]):
+            self.assertIsNone(calendar_tool.horario_dia(date(2030, 1, 7)))
+            self.assertIsNotNone(calendar_tool.horario_dia(date(2030, 1, 8)))  # cita con hora no cierra

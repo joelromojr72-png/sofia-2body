@@ -479,9 +479,51 @@ def _obtener_servicio():
     return _servicio
 
 
+# Días que el spa NO trabaja (feriados, puentes, cierres). Dos formas, sin tocar código:
+#   • En Google Calendar (principal o de servicio), un evento de DÍA COMPLETO que diga
+#     "cerrado", "no se trabaja", "feriado", "festivo", "inhábil" o "sin servicio".
+#   • Variable DIAS_CERRADOS="2026-11-16,2026-12-25" en Railway.
+_CIERRE_DIA = re.compile(
+    r"\b(cerrad[oa]|no\s+se\s+trabaja|no\s+laboral|feriado|festivo|inh[aá]bil|sin\s+servicio|d[ií]a\s+libre|vacaciones)\b",
+    re.I,
+)
+_cache_cerrado: dict[date, tuple[float, bool]] = {}
+
+
+def dia_cerrado(fecha: date) -> bool:
+    """¿El spa cierra ese día por feriado/cierre? (domingo aparte, ver HORARIO)."""
+    import time as _t
+
+    fijos = {x.strip() for x in (os.getenv("DIAS_CERRADOS") or "").split(",") if x.strip()}
+    if fecha.isoformat() in fijos:
+        return True
+    hit = _cache_cerrado.get(fecha)
+    if hit and _t.monotonic() - hit[0] < 600:
+        return hit[1]
+    cerrado = False
+    svc = _obtener_servicio()
+    if svc:
+        for _cal, ev in _eventos_dia_todos(svc, fecha):
+            if ev.get("status") == "cancelled" or ev.get("start", {}).get("dateTime"):
+                continue  # solo eventos de día completo
+            if _CIERRE_DIA.search(ev.get("summary", "") or ""):
+                cerrado = True
+                break
+    _cache_cerrado[fecha] = (_t.monotonic(), cerrado)
+    return cerrado
+
+
 def horario_dia(fecha: date) -> tuple[time, time] | None:
-    """Horario de atencion de ese dia, o None si esta cerrado."""
-    return HORARIO.get(fecha.weekday())
+    """Horario de atencion de ese dia, o None si esta cerrado (domingo o feriado/cierre)."""
+    hd = HORARIO.get(fecha.weekday())
+    if hd is None:
+        return None
+    try:
+        if dia_cerrado(fecha):
+            return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"No se pudo revisar si {fecha} está cerrado: {e}")
+    return hd
 
 
 def verificar_conexion() -> tuple[bool, str]:
@@ -738,7 +780,7 @@ def crear_cita(
 
     hd = horario_dia(inicio.date())
     if hd is None:
-        return {"ok": False, "error": "Ese día el spa está cerrado (domingo)."}
+        return {"ok": False, "error": "Ese día el spa está cerrado (domingo o día de descanso). Ofrece otro día."}
     apertura, cierre = hd
     fin = inicio + timedelta(minutes=max(15, duracion_min))
     if inicio.time() < apertura or fin.time() > cierre:

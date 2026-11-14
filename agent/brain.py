@@ -514,7 +514,8 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
             fecha = date.fromisoformat(args["fecha"])
             hd = calendar_tool.horario_dia(fecha)
             if hd is None:
-                return f"El {fecha.isoformat()} es domingo: el spa está cerrado. Ofrece otro día."
+                return (f"El {fecha.isoformat()} el spa está cerrado (domingo o día de descanso/feriado). "
+                        "Ofrece otro día.")
             servicio_c = (args.get("servicio") or "").strip()
             # Lo que se OFRECE debe poder AGENDARSE después. Antes se consultaba "facial" y se
             # agendaba "Sesión facial sin costo" (regla más estricta) → "ya no está disponible".
