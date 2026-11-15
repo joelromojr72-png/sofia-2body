@@ -225,6 +225,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(atribucion.loop_ventas())
         # Ventas marcadas en GHL ("Paquete vendido") → Compra en Meta.
         asyncio.create_task(ghl.loop_ventas_ghl())
+        # Citas de Google Calendar → etapa de la tarjeta en GHL.
+        from agent import ghl_agenda
+        asyncio.create_task(ghl_agenda.loop())
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
 
@@ -341,6 +344,17 @@ async def ghl_anegocios(request: Request, tareas: BackgroundTasks, key: str = ""
 
     tareas.add_task(correr)
     return {"recibidas": len(filas), "procesando": True, "anterior": dict(ghl.ultimo_anegocios)}
+
+
+@app.post("/ghl/agenda")
+async def ghl_agenda_ahora(tareas: BackgroundTasks, key: str = ""):
+    """Corre ya la revisión de Google Calendar → GHL (normalmente corre sola cada 6 h)."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from agent import ghl_agenda
+    tareas.add_task(ghl_agenda.ciclo)
+    return {"procesando": True, "anterior": dict(ghl_agenda.ultimo)}
 
 
 @app.get("/ghl/importar")

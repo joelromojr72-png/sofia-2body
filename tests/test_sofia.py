@@ -1188,3 +1188,19 @@ class DiasCerrados(unittest.TestCase):
                           lambda svc, f: [("cal", ev)] if f == date(2030, 1, 7) else [("cal", cita)]):
             self.assertIsNone(calendar_tool.horario_dia(date(2030, 1, 7)))
             self.assertIsNotNone(calendar_tool.horario_dia(date(2030, 1, 8)))  # cita con hora no cierra
+
+
+class AgendaAGHL(unittest.TestCase):
+    """15-nov: las citas de Google Calendar mueven la tarjeta en GHL."""
+
+    def test_clasificar(self):
+        from agent import ghl_agenda as ga
+        ahora = _dt(2030, 1, 10, 12, tzinfo=timezone.utc)
+        ev = lambda cal, t, dias: {"cal": cal, "titulo": t, "desc": "", "inicio": ahora + timedelta(days=dias)}
+        self.assertEqual(ga.clasificar(ev("cita de venta o ex unica", "Ana - Exp. Única facial", 2), ahora), "agendada")
+        self.assertEqual(ga.clasificar(ev("faciales", "Ana - Exp. Única facial", -2), ahora), "realizada")
+        self.assertEqual(ga.clasificar(ev("faciales", "Ana - valoración", -20), ahora), "reactivacion")
+        self.assertEqual(ga.clasificar(ev("corporales", "Ana - Maderoterapia", -1), ahora), "tratamiento")
+        self.assertIsNone(ga.clasificar(ev("faciales", "Ana - CANCELÓ", -1), ahora))
+        self.assertIsNone(ga.clasificar(ev("2body pachuca", "Junta equipo", 1), ahora))
+        self.assertEqual(ga.decidir(["reactivacion", "tratamiento", "agendada"]), "tratamiento")

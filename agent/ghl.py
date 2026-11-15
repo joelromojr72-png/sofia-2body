@@ -32,9 +32,13 @@ ETAPAS = {
     "nuevo": "lead nuevo",
     "contactada": "contactada",
     "agendada": "valoracion agendada",
+    # Estas las mueve la revisión de Google Calendar (agent/ghl_agenda.py):
+    "realizada": "valoracion realizada",
+    "tratamiento": "en tratamiento",
+    "reactivacion": "reactivacion",
 }
-# Etapas que NO mueve Sofía pero sí lee (ventas para Meta).
-ETAPAS_LECTURA = {"vendido": "paquete vendido", "tratamiento": "en tratamiento"}
+# Etapas que se leen (ventas para Meta) aunque Sofía no las ponga directo.
+ETAPAS_LECTURA = {"vendido": "paquete vendido"}
 
 _pipeline: dict | None = None            # {"id": ..., "etapas": {clave: (id, posicion)}, "pos": {id: posicion}}
 _opps: dict[str, tuple[str, int]] = {}   # telefono → (id de la oportunidad, posición de su etapa)
@@ -175,7 +179,8 @@ async def sincronizar(telefono: str, etapa: str, nombre: str = "", nota: str = "
             else:
                 opp_id, pos = opp
                 cambios = {}
-                if etapa_pos > pos:
+                ya_compro = "vendido" in pipe["etapas"] and pos >= pipe["etapas"]["vendido"][1]
+                if etapa_pos > pos and not (etapa == "reactivacion" and ya_compro):
                     cambios["pipelineStageId"] = etapa_id
                 if nombre:
                     cambios["name"] = nombre
@@ -185,7 +190,7 @@ async def sincronizar(telefono: str, etapa: str, nombre: str = "", nota: str = "
                     r = await c.put(f"/opportunities/{opp_id}", json=cambios)
                     r.raise_for_status()
                     logger.info(f"[GHL] tarjeta de {telefono} → {etapa if etapa_pos > pos else 'mismo lugar'}")
-                _opps[telefono] = (opp_id, max(pos, etapa_pos))
+                _opps[telefono] = (opp_id, pos if "pipelineStageId" not in cambios else etapa_pos)
             if nota:
                 try:
                     await c.post(f"/contacts/{contacto_id}/notes", json={"body": nota})
