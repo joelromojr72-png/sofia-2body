@@ -326,3 +326,83 @@ async def loop_ventas_ghl() -> None:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[GHL→Meta] ciclo falló: {e}")
         await asyncio.sleep(GHL_VENTAS_CADA_MIN * 60)
+
+
+# ── Ventas de Anegocios → GHL ────────────────────────────────────────────────
+# Cada noche, la revisión de Anegocios manda [nombre, teléfono, total] de cada clienta con
+# venta. Aquí se busca su contacto (en GHL los teléfonos son +521XXXXXXXXXX), se mueve su
+# tarjeta a "Paquete vendido" (nunca hacia atrás) con valor = total comprado, y se etiqueta.
+# Se omiten teléfonos que comparten varias clientas distintas (números de relleno).
+async def _buscar_contacto_tel(c: httpx.AsyncClient, tel10: str) -> dict | None:
+    for num in ("+521" + tel10, "+52" + tel10):
+        r = await c.get("/contacts/search/duplicate", params={"locationId": _loc(), "number": num})
+        if r.status_code == 200 and (r.json() or {}).get("contact"):
+            return r.json()["contact"]
+    return None
+
+
+async def ligar_ventas_anegocios(filas: list) -> dict:
+    from collections import Counter, OrderedDict, defaultdict
+
+    nombres_tel: dict[str, set] = defaultdict(set)
+    limpias = []
+    for f in filas:
+        try:
+            nombre, tel, total = str(f[0]), "".join(ch for ch in str(f[1]) if ch.isdigit())[-10:], float(f[2])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if len(tel) == 10 and nombre.strip():
+            limpias.append((nombre, tel, total))
+            nombres_tel[tel].add(" ".join(nombre.upper().split()))
+    agg: OrderedDict = OrderedDict()
+    omitidas = []
+    for nombre, tel, total in limpias:
+        if len(nombres_tel[tel]) > 1:
+            omitidas.append(nombre)
+            continue
+        a = agg.setdefault(tel, {"nombre": " ".join(nombre.split()).title(), "total": 0.0, "notas": 0})
+        a["total"] += total
+        a["notas"] += 1
+    cuenta: Counter = Counter()
+    async with _cliente() as c:
+        pipe = await _cargar_pipeline(c)
+        if "vendido" not in pipe["etapas"]:
+            return {"error": "no existe la etapa Paquete vendido"}
+        vend_id, vend_pos = pipe["etapas"]["vendido"]
+        for tel, a in agg.items():
+            try:
+                total = round(a["total"], 2)
+                contacto = await _buscar_contacto_tel(c, tel)
+                if not contacto:
+                    r = await c.post("/contacts/upsert", json={
+                        "locationId": _loc(), "phone": "+521" + tel, "name": a["nombre"],
+                        "source": "Anegocios", "tags": ["anegocios", "vendido"]})
+                    r.raise_for_status()
+                    contacto = r.json()["contact"]
+                    cuenta["contactos_nuevos"] += 1
+                else:
+                    await c.post(f"/contacts/{contacto['id']}/tags", json={"tags": ["anegocios", "vendido"]})
+                opp = await _buscar_opp(c, pipe, contacto["id"])
+                if opp:
+                    opp_id, pos = opp
+                    cuerpo = {"monetaryValue": total}
+                    if pos < vend_pos:
+                        cuerpo["pipelineStageId"] = vend_id
+                        cuenta["movidas_a_vendido"] += 1
+                    r = await c.put(f"/opportunities/{opp_id}", json=cuerpo)
+                    r.raise_for_status()
+                    _opps.pop(tel, None)
+                else:
+                    r = await c.post("/opportunities/", json={
+                        "pipelineId": pipe["id"], "locationId": _loc(), "name": a["nombre"],
+                        "pipelineStageId": vend_id, "status": "open", "contactId": contacto["id"],
+                        "source": "Anegocios", "monetaryValue": total})
+                    r.raise_for_status()
+                    cuenta["tarjetas_nuevas"] += 1
+                cuenta["ok"] += 1
+            except Exception as e:  # noqa: BLE001
+                cuenta["errores"] += 1
+                logger.warning(f"[Anegocios→GHL] {tel[-4:]}: {e}")
+                await asyncio.sleep(5)
+            await asyncio.sleep(0.4)
+    return {"clientas": len(agg), "omitidas_tel_compartido": len(omitidas), **dict(cuenta)}

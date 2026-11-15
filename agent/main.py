@@ -248,7 +248,7 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https://((apex|2body)-[a-z0-9-]+\.vercel\.app|localhost(:\d+)?)|http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origin_regex=r"https://((apex|2body)-[a-z0-9-]+\.vercel\.app|localhost(:\d+)?|anegocios\.com)|http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["X-Console-Key", "Content-Type"],
 )
@@ -318,6 +318,23 @@ async def ghl_ventas(key: str = ""):
     if not clave or key != clave:
         raise HTTPException(status_code=403, detail="clave invalida")
     return await ghl.ciclo_ventas_ghl()
+
+
+@app.post("/ghl/anegocios")
+async def ghl_anegocios(request: Request, key: str = ""):
+    """Ventas de Anegocios ([[nombre, teléfono, total], ...]) → tarjetas en 'Paquete vendido'."""
+    clave = os.getenv("ANEGOCIOS_SYNC_KEY") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    filas = await request.json()
+    if not isinstance(filas, list):
+        raise HTTPException(status_code=400, detail="se esperaba una lista")
+    r = await ghl.ligar_ventas_anegocios(filas[:2000])
+    try:
+        r["meta"] = await ghl.ciclo_ventas_ghl()
+    except Exception as e:  # noqa: BLE001
+        r["meta"] = str(e)[:200]
+    return r
 
 
 @app.get("/ghl/importar")

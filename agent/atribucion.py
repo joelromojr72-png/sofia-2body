@@ -46,7 +46,7 @@ _SALUDO_ANUNCIO = re.compile(
     r"^(¡?hola!?\s*)?quiero más información|^¡?hola!? quiero mi promo|can i get more info", re.I
 )
 # Cuentas del equipo / pruebas que no son clientas
-_EXCLUIR_NOMBRES = re.compile(r"joel|edgar romo|isabella", re.I)
+_EXCLUIR_NOMBRES = re.compile(r"\bjoel romo\b|edgar romo|isabella", re.I)  # "Romo Rosas Joel" SÍ es clienta
 _STOP = {"de", "la", "del", "los", "las", "y", "sesion", "facial", "corporal", "depilacion",
          "masaje", "valoracion", "experiencia", "unica", "exp", "ma", "maria", "cita",
          "por", "confirmar"}

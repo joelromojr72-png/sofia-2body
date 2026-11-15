@@ -1140,6 +1140,18 @@ class GHLPipeline(unittest.IsolatedAsyncioTestCase):
         tags = [c for c in self.llamadas if c[1].endswith("/tags")][0]
         self.assertIn("anuncio: Buen Fin faciales", tags[2]["tags"])
 
+    async def test_anegocios_suma_y_omite_telefono_compartido(self):
+        from agent import ghl
+        a, b = self._mock()
+        filas = [["ANA LOPEZ", "7711000001", 1000], ["Ana Lopez", "7711000001", 500],
+                 ["X UNO", "5530469425", 10], ["Y DOS", "5530469425", 20]]
+        with a, b:
+            r = await ghl.ligar_ventas_anegocios(filas)
+        self.assertEqual(r["clientas"], 1)
+        self.assertEqual(r["omitidas_tel_compartido"], 2)
+        creada = [c for c in self.llamadas if c[:2] == ("POST", "/opportunities/")][0]
+        self.assertEqual(creada[2]["monetaryValue"], 1500)
+
     async def test_sin_llave_no_hace_nada(self):
         from agent import ghl
         with patch.dict(os.environ, {"GHL_TOKEN": "", "GHL_LOCATION_ID": ""}):
