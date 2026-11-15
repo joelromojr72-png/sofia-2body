@@ -32,6 +32,10 @@ logger = logging.getLogger("agentkit")
 PREFIJO_MSGR = "msgr:"
 
 
+# Marca que Sofía pone en sus mensajes para reconocer su propio "echo" (Messenger lo devuelve).
+MARCA_SOFIA = "sofia-2body"
+
+
 class ProveedorMessenger(ProveedorWhatsApp):
     """Proveedor de Facebook Messenger usando la Send API de Meta."""
 
@@ -147,7 +151,24 @@ class ProveedorMessenger(ProveedorWhatsApp):
                 )
 
                 if mensaje.get("is_echo"):
-                    continue  # lo mandó la propia página, no un cliente
+                    # Lo mandó la página. Si NO lo mandó Sofía (no trae su marca), lo escribió una
+                    # persona del equipo (Business Suite, GHL, app de la página): se registra como
+                    # turno del equipo para que Sofía se calle en ese chat, igual que en WhatsApp.
+                    if mensaje.get("metadata") == MARCA_SOFIA:
+                        continue
+                    cliente = (evento.get("recipient") or {}).get("id", "")
+                    mid = mensaje.get("mid") or f"eco:{cliente}:{ts}"
+                    if cliente and mensaje.get("text"):
+                        mensajes.append(
+                            MensajeEntrante(
+                                telefono=f"{PREFIJO_MSGR}{cliente}",
+                                texto=mensaje["text"],
+                                mensaje_id=mid,
+                                es_propio=False,
+                                contexto={"evento_id": f"eco:{mid}", "tipo": "echo_equipo", "psid": cliente},
+                            )
+                        )
+                    continue
 
                 # Prioridad: texto real > botón/postback > referral de anuncio.
                 if mensaje.get("text"):
@@ -201,7 +222,7 @@ class ProveedorMessenger(ProveedorWhatsApp):
                     json={
                         "recipient": {"id": psid},
                         "messaging_type": "RESPONSE",
-                        "message": {"text": mensaje},
+                        "message": {"text": mensaje, "metadata": MARCA_SOFIA},
                     },
                 )
         except httpx.HTTPError as e:

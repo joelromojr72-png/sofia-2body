@@ -1204,3 +1204,27 @@ class AgendaAGHL(unittest.TestCase):
         self.assertIsNone(ga.clasificar(ev("faciales", "Ana - CANCELÓ", -1), ahora))
         self.assertIsNone(ga.clasificar(ev("2body pachuca", "Junta equipo", 1), ahora))
         self.assertEqual(ga.decidir(["reactivacion", "tratamiento", "agendada"]), "tratamiento")
+
+
+class MessengerEcoEquipo(unittest.IsolatedAsyncioTestCase):
+    """15-nov: si el equipo contesta Messenger desde GHL/Business Suite, Sofía se entera y se calla."""
+
+    async def test_eco_del_equipo_vs_eco_de_sofia(self):
+        from agent.providers import messenger as m
+        prov = m.ProveedorMessenger.__new__(m.ProveedorMessenger)
+
+        def req(meta):
+            msg = {"is_echo": True, "mid": "m1", "text": "Hola, soy Blanca"}
+            if meta:
+                msg["metadata"] = meta
+            body = {"object": "page", "entry": [{"messaging": [
+                {"sender": {"id": "PAGINA"}, "recipient": {"id": "123"}, "timestamp": 1, "message": msg}]}]}
+            r = MagicMock()
+            r.json = AsyncMock(return_value=body)
+            return r
+
+        eq = await prov.parsear_webhook(req(None))
+        self.assertEqual(len(eq), 1)
+        self.assertEqual(eq[0].contexto["tipo"], "echo_equipo")
+        self.assertEqual(eq[0].telefono, m.PREFIJO_MSGR + "123")
+        self.assertEqual(await prov.parsear_webhook(req(m.MARCA_SOFIA)), [])
