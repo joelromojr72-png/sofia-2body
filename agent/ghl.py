@@ -63,8 +63,22 @@ def _norm(t: str) -> str:
     return "".join(c for c in t if unicodedata.category(c) != "Mn").lower().strip()
 
 
+class _Reintenta429(httpx.AsyncHTTPTransport):
+    """GHL limita peticiones por minuto (429): esperar y reintentar, hasta 5 veces."""
+
+    async def handle_async_request(self, request):
+        for intento in range(5):
+            resp = await super().handle_async_request(request)
+            if resp.status_code != 429:
+                return resp
+            await resp.aclose()
+            espera = float(resp.headers.get("retry-after") or 0) or 3 * (intento + 1)
+            await asyncio.sleep(min(espera, 30))
+        return await super().handle_async_request(request)
+
+
 def _cliente() -> httpx.AsyncClient:
-    return httpx.AsyncClient(base_url=API, headers=_headers(), timeout=20)
+    return httpx.AsyncClient(base_url=API, headers=_headers(), timeout=30, transport=_Reintenta429())
 
 
 async def _cargar_pipeline(c: httpx.AsyncClient) -> dict:
