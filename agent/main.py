@@ -321,7 +321,7 @@ async def ghl_ventas(key: str = ""):
 
 
 @app.post("/ghl/anegocios")
-async def ghl_anegocios(request: Request, key: str = ""):
+async def ghl_anegocios(request: Request, tareas: BackgroundTasks, key: str = ""):
     """Ventas de Anegocios ([[nombre, teléfono, total], ...]) → tarjetas en 'Paquete vendido'."""
     clave = os.getenv("ANEGOCIOS_SYNC_KEY") or ""
     if not clave or key != clave:
@@ -329,12 +329,18 @@ async def ghl_anegocios(request: Request, key: str = ""):
     filas = await request.json()
     if not isinstance(filas, list):
         raise HTTPException(status_code=400, detail="se esperaba una lista")
-    r = await ghl.ligar_ventas_anegocios(filas[:2000])
-    try:
-        r["meta"] = await ghl.ciclo_ventas_ghl()
-    except Exception as e:  # noqa: BLE001
-        r["meta"] = str(e)[:200]
-    return r
+    async def correr():
+        r = await ghl.ligar_ventas_anegocios(filas[:2000])
+        try:
+            r["meta"] = await ghl.ciclo_ventas_ghl()
+        except Exception as e:  # noqa: BLE001
+            r["meta"] = str(e)[:200]
+        ghl.ultimo_anegocios.clear()
+        ghl.ultimo_anegocios.update(r)
+        logger.info(f"[Anegocios→GHL] {r}")
+
+    tareas.add_task(correr)
+    return {"recibidas": len(filas), "procesando": True, "anterior": dict(ghl.ultimo_anegocios)}
 
 
 @app.get("/ghl/importar")

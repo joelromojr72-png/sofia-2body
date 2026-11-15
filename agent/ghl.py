@@ -328,6 +328,8 @@ async def loop_ventas_ghl() -> None:
         await asyncio.sleep(GHL_VENTAS_CADA_MIN * 60)
 
 
+ultimo_anegocios: dict = {}
+
 # ── Ventas de Anegocios → GHL ────────────────────────────────────────────────
 # Cada noche, la revisión de Anegocios manda [nombre, teléfono, total] de cada clienta con
 # venta. Aquí se busca su contacto (en GHL los teléfonos son +521XXXXXXXXXX), se mueve su
