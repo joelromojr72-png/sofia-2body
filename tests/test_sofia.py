@@ -266,6 +266,13 @@ class UnaGratisALaVez(unittest.TestCase):
 
     FECHA = date(2030, 1, 7)  # lunes
 
+    def setUp(self):
+        # Estas pruebas revisan la regla de 2 citas a las 10:00; la de "una sola cosmetóloga"
+        # (9, 10, 18 y 19 h) tiene su propia prueba abajo.
+        p = patch.object(calendar_tool, "HORAS_UNA_CITA", set())
+        p.start()
+        self.addCleanup(p.stop)
+
     def _evento(self, titulo, hora=10, id_="ajeno", creado="2030-01-01T00:00:00.000Z", tel="5217710000000"):
         return ("cal", {
             "id": id_, "summary": titulo, "created": creado, "status": "tentative",
@@ -1228,3 +1235,31 @@ class MessengerEcoEquipo(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(eq[0].contexto["tipo"], "echo_equipo")
         self.assertEqual(eq[0].telefono, m.PREFIJO_MSGR + "123")
         self.assertEqual(await prov.parsear_webhook(req(m.MARCA_SOFIA)), [])
+
+
+class UnaCosmetologa(unittest.TestCase):
+    """Blanca, 17-nov: a las 9, 10, 18 y 19 h solo hay una cosmetóloga → una sola cita en todo el spa."""
+
+    FECHA = date(2030, 1, 7)  # lunes
+
+    def test_slots_una_sola_cita_en_esas_horas(self):
+        for h in ("09:00", "10:00", "18:00", "19:00"):
+            fin = f"{int(h[:2]) + 1:02d}:00"
+            citas = [{"inicio": h, "fin": fin, "categoria": "corporales", "gratis": False}]
+            with patch.object(calendar_tool, "citas_del_dia", lambda f, c=citas: c), \
+                 patch.object(calendar_tool, "dia_cerrado", lambda f: False):
+                libres = calendar_tool.slots_libres(self.FECHA, 60, 60, 20, "Tratamiento facial")
+            self.assertNotIn(h, libres, h)
+
+    def test_slots_otras_horas_siguen_con_dos(self):
+        citas = [{"inicio": "12:00", "fin": "13:00", "categoria": "corporales", "gratis": False}]
+        with patch.object(calendar_tool, "citas_del_dia", lambda f, c=citas: c), \
+             patch.object(calendar_tool, "dia_cerrado", lambda f: False):
+            libres = calendar_tool.slots_libres(self.FECHA, 60, 60, 20, "Tratamiento facial")
+        self.assertIn("12:00", libres)
+
+    def test_tope(self):
+        from datetime import time as _t
+        self.assertEqual(calendar_tool.tope_citas(_t(9, 0)), 1)
+        self.assertEqual(calendar_tool.tope_citas(_t(19, 0)), 1)
+        self.assertEqual(calendar_tool.tope_citas(_t(11, 0)), calendar_tool.MAX_CITAS_SIMULTANEAS)

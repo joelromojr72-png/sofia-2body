@@ -244,6 +244,14 @@ def _categoria_evento(cal_id: str, ev: dict, explicita: bool = False) -> str | N
 # DISTINTOS (p. ej. un descontracturante y un facial), porque no hay más personal. Dos del
 # mismo servicio nunca (una cabina por servicio). 0 = sin tope.
 MAX_CITAS_SIMULTANEAS = int(os.getenv("MAX_CITAS_SIMULTANEAS") or "2")
+# Horas en que solo hay UNA cosmetóloga → solo cabe UNA cita en todo el spa (Blanca, 17-nov:
+# "9:00 y 10:00 am solo es una cita por hora… y a las 6:00 y 7:00 pm lo mismo").
+HORAS_UNA_CITA = {int(h) for h in (os.getenv("HORAS_UNA_CITA") or "9,10,18,19").split(",") if h.strip().isdigit()}
+
+
+def tope_citas(hora_inicio) -> int:
+    """Máximo de citas simultáneas (de toda la clínica) para una cita que empieza a esa hora."""
+    return 1 if hora_inicio.hour in HORAS_UNA_CITA else MAX_CITAS_SIMULTANEAS
 
 
 def _chocan(cat_nueva: str | None, cat_existente: str | None) -> bool:
@@ -676,8 +684,8 @@ def slots_libres(
         ini_t, fin_t = t.time(), (t + d).time()
         en_futuro = t >= ahora + timedelta(minutes=1)
         choca = any(ini_t < of and fin_t > oi for (oi, of) in ocupadas) or (
-            MAX_CITAS_SIMULTANEAS
-            and sum(1 for (oi, of) in todas if ini_t < of and fin_t > oi) >= MAX_CITAS_SIMULTANEAS
+            tope_citas(ini_t)
+            and sum(1 for (oi, of) in todas if ini_t < of and fin_t > oi) >= tope_citas(ini_t)
         )
         if en_futuro and not choca:
             libres.append(t.strftime("%H:%M"))
@@ -896,11 +904,13 @@ def crear_cita(
                     "link": ev.get("htmlLink", ""),
                 }
             simultaneas += 1
-            if MAX_CITAS_SIMULTANEAS and simultaneas >= MAX_CITAS_SIMULTANEAS:
-                logger.info(f"Tope de {MAX_CITAS_SIMULTANEAS} citas simultáneas: se rechaza {inicio.isoformat()}")
+            if tope_citas(inicio) and simultaneas >= tope_citas(inicio):
+                logger.info(f"Tope de {tope_citas(inicio)} cita(s) simultánea(s): se rechaza {inicio.isoformat()}")
                 return {
                     "ok": False,
-                    "error": f"A esa hora ({inicio.strftime('%H:%M')}) ya hay {MAX_CITAS_SIMULTANEAS} citas; ofrece otra hora.",
+                    "error": (f"A esa hora ({inicio.strftime('%H:%M')}) solo hay una cosmetóloga y ya hay una cita; ofrece otra hora."
+                              if tope_citas(inicio) == 1 else
+                              f"A esa hora ({inicio.strftime('%H:%M')}) ya hay {tope_citas(inicio)} citas; ofrece otra hora."),
                 }
             if nueva_gratis and _es_cita_gratis(ev) and not es_bloqueo(ev):
                 logger.info(f"Ya hay otra sesión sin costo, se rechaza: {inicio.isoformat()}")
@@ -1002,7 +1012,7 @@ def crear_cita(
                 antes = (otro.get("created", ""), otro.get("id", "")) < (nuestro_created, nuestro_id)
                 previas += 1 if antes else 0
                 dos_gratis = nueva_gratis and _es_cita_gratis(otro) and not es_bloqueo(otro)
-                if not dos_gratis and not _choca_evento(cat_nueva, _cal, otro) and (not MAX_CITAS_SIMULTANEAS or previas < MAX_CITAS_SIMULTANEAS):
+                if not dos_gratis and not _choca_evento(cat_nueva, _cal, otro) and (not tope_citas(inicio) or previas < tope_citas(inicio)):
                     continue  # otro servicio y sin pasar el tope: se puede empalmar
                 if antes:
                     try:
