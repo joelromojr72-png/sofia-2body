@@ -641,8 +641,12 @@ async def pausar_seguimiento(telefono: str) -> None:
         await s.commit()
 
 
-async def leads_para_seguimiento(limite: int = 40) -> list[dict]:
-    """Leads activos cuyo próximo seguimiento ya venció y aún les quedan toques."""
+async def leads_para_seguimiento(limite: int = 8) -> list[dict]:
+    """
+    Leads activos cuyo próximo seguimiento ya venció y aún les quedan toques. Solo quien escribió
+    en los últimos 10 días (no se reactiva a leads viejos de golpe) y pocos por vuelta (cada 15 min),
+    para no mandar ráfagas de plantillas que bajen la calidad del número.
+    """
     async with async_session() as s:
         r = await s.execute(
             select(Lead)
@@ -652,8 +656,10 @@ async def leads_para_seguimiento(limite: int = 40) -> list[dict]:
                 Lead.proximo_seguimiento.is_not(None),
                 Lead.proximo_seguimiento <= ahora(),
                 Lead.etapa_seguimiento < len(_CADENCIA_HORAS),
+                Lead.last_inbound.is_not(None),
+                Lead.last_inbound >= ahora() - timedelta(days=10),
             )
-            .order_by(Lead.proximo_seguimiento)
+            .order_by(Lead.proximo_seguimiento.desc())
             .limit(limite)
         )
         leads = list(r.scalars().all())

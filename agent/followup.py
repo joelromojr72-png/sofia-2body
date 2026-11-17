@@ -64,11 +64,15 @@ def _sofia_de_turno(now: datetime | None = None) -> bool:
 
 
 def _en_horario(now: datetime | None = None) -> bool:
-    """Plantillas (multi-día): lun-sáb 10:00-19:00 y SOLO en el turno de Sofía."""
+    """
+    Plantillas (multi-día), SOLO en el turno de Sofía: lun-sáb hasta las 21:00 (en la práctica
+    lun-vie 20-21 h y sáb 14:30-21 h) y domingo 10:00-14:00. Antes era lun-sáb 10-19 h, que con
+    el turno del equipo solo dejaba el sábado en la tarde: no salía casi ningún seguimiento (17-nov).
+    """
     now = now or datetime.now(TZ)
-    if now.weekday() == 6:  # domingo
-        return False
-    if not (10 <= now.hour < 19):
+    if now.weekday() == 6:  # domingo: mañana, no en la noche
+        return 10 <= now.hour < 14 and _sofia_de_turno(now)
+    if not (10 <= now.hour < 21):
         return False
     return _sofia_de_turno(now)
 
@@ -601,7 +605,7 @@ async def loop_seguimiento(proveedor, intervalo_seg: int = 900) -> None:
         return
     logger.info(
         "Seguimiento ACTIVADO — toque de cierre 24h (9-21h) + multi-día por plantilla "
-        "(+24h/+3d/+7d, 10-19h lun-sáb), SOLO en el turno de Sofía (fuera del horario del equipo)."
+        "(+24h/+3d/+7d, lun-sáb hasta 21h, dom 10-14h), SOLO en el turno de Sofía (fuera del horario del equipo)."
         + (" + recordatorio el día antes a TODAS las citas (10-20h, también en horario del equipo)."
            if _confirm_habilitado() else "")
         + " + recordatorio ligero (1 vez) si la clienta no contesta al equipo en 3 h (9-21h)."
