@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import re
+import threading
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -422,7 +423,11 @@ def _oauth_configurado() -> bool:
     return bool(OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET and OAUTH_REFRESH_TOKEN)
 
 
-_servicio = None  # cache del cliente de Calendar
+_hilo = threading.local()  # un cliente de Calendar por hilo (ver _obtener_servicio)
+
+
+class AgendaNoLeida(RuntimeError):
+    """No se pudo leer un calendario: mejor no ofrecer/agendar que ofrecer horas que no existen."""
 
 
 def _cargar_credenciales_json() -> dict | None:
@@ -450,10 +455,15 @@ def calendario_configurado() -> bool:
 
 
 def _obtener_servicio():
-    """Construye (y cachea) el cliente de Google Calendar."""
-    global _servicio
-    if _servicio is not None:
-        return _servicio
+    """
+    Cliente de Google Calendar, UNO POR HILO. El cliente (httplib2) no es seguro entre hilos: al
+    compartirlo, las consultas simultáneas (Sofía + seguimiento + recordatorios) rompían la
+    conexión ("[SSL] record layer failure") y el calendario se leía VACÍO → Sofía ofrecía horas
+    ocupadas y luego decía que ya no había (16-nov).
+    """
+    svc = getattr(_hilo, "svc", None)
+    if svc is not None:
+        return svc
 
     # 1) OAuth de usuario (preferido): la app actua como el usuario que autorizo.
     if _oauth_configurado():
@@ -465,18 +475,16 @@ def _obtener_servicio():
             token_uri="https://oauth2.googleapis.com/token",
             scopes=_SCOPES,
         )
-        _servicio = build("calendar", "v3", credentials=creds, cache_discovery=False)
-        return _servicio
-
-    # 2) Cuenta de servicio (respaldo).
-    info = _cargar_credenciales_json()
-    if not info:
-        return None
-    creds = service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
-    if IMPERSONAR:
-        creds = creds.with_subject(IMPERSONAR)
-    _servicio = build("calendar", "v3", credentials=creds, cache_discovery=False)
-    return _servicio
+    else:
+        # 2) Cuenta de servicio (respaldo).
+        info = _cargar_credenciales_json()
+        if not info:
+            return None
+        creds = service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
+        if IMPERSONAR:
+            creds = creds.with_subject(IMPERSONAR)
+    _hilo.svc = build("calendar", "v3", credentials=creds, cache_discovery=False)
+    return _hilo.svc
 
 
 # Días que el spa NO trabaja (feriados, puentes, cierres). Dos formas, sin tocar código:
@@ -539,24 +547,38 @@ def verificar_conexion() -> tuple[bool, str]:
         return False, f"No se pudo abrir el calendario: {e}"
 
 
-def _listar_eventos(svc, cal_id: str, ini_iso: str, fin_iso: str) -> list[dict]:
-    """Lista los eventos de UN calendario en un rango. Un calendario que falla no tumba el resto."""
-    try:
-        resp = (
-            svc.events()
-            .list(
-                calendarId=cal_id,
-                timeMin=ini_iso,
-                timeMax=fin_iso,
-                singleEvents=True,
-                orderBy="startTime",
+def _listar_eventos(svc, cal_id: str, ini_iso: str, fin_iso: str, estricto: bool = False) -> list[dict]:
+    """
+    Lista los eventos de UN calendario en un rango (reintenta si la conexión falla).
+    estricto=True: si no se pudo leer, lanza AgendaNoLeida (para disponibilidad/agendar: un
+    calendario "vacío" por error haría ofrecer horas ocupadas). Si no, devuelve [].
+    """
+    ultimo_error: Exception | None = None
+    for intento in range(3):
+        try:
+            resp = (
+                svc.events()
+                .list(
+                    calendarId=cal_id,
+                    timeMin=ini_iso,
+                    timeMax=fin_iso,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute()
             )
-            .execute()
-        )
-        return resp.get("items", [])
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Error leyendo calendario {cal_id}: {e}")
-        return []
+            return resp.get("items", [])
+        except Exception as e:  # noqa: BLE001
+            ultimo_error = e
+            if getattr(getattr(e, "resp", None), "status", 0) in (403, 404):
+                break  # sin permiso / no existe: reintentar no sirve
+            # Conexión rota: cliente nuevo para este hilo antes de reintentar.
+            _hilo.svc = None
+            svc = _obtener_servicio() or svc
+    logger.error(f"Error leyendo calendario {cal_id}: {ultimo_error}")
+    if estricto:
+        raise AgendaNoLeida(f"no se pudo leer el calendario {cal_id}: {ultimo_error}")
+    return []
 
 
 def _eventos_dia_todos(svc, fecha: date) -> list[tuple[str, dict]]:
@@ -565,7 +587,7 @@ def _eventos_dia_todos(svc, fecha: date) -> list[tuple[str, dict]]:
     fin = ini + timedelta(days=1)
     salida: list[tuple[str, dict]] = []
     for cal_id in _calendarios_disponibilidad():
-        for ev in _listar_eventos(svc, cal_id, ini.isoformat(), fin.isoformat()):
+        for ev in _listar_eventos(svc, cal_id, ini.isoformat(), fin.isoformat(), estricto=True):
             salida.append((cal_id, ev))
     return salida
 

@@ -72,7 +72,9 @@ HERRAMIENTAS = [
             "servicio tal como lo vas a agendar (con 'sin costo' si lo es): las citas de OTRO "
             "servicio a la misma hora no estorban (cada servicio tiene su cabina), así salen más "
             "horarios (también una sesión sin costo facial y una corporal). Si es sin costo, di SIEMPRE "
-            "si es facial o corporal (p. ej. 'Exp. Única facial sin costo')."
+            "si es facial o corporal (p. ej. 'Exp. Única facial sin costo'). En toda la plática usa "
+            "SIEMPRE el MISMO 'servicio' (el mismo con el que vas a agendar): si cambias de servicio "
+            "cambian las horas libres y te contradices."
         ),
         "input_schema": {
             "type": "object",
@@ -464,13 +466,18 @@ def servicio_para_consultar(servicio: str) -> str:
     return f"{s} sin costo"
 
 
-# Horarios que se le OFRECIERON a cada clienta (para no ofrecer de más ni contradecirse).
-_ofrecidos: dict[str, dict[str, list[str]]] = {}
+# Horarios que se le OFRECIERON a cada clienta, y con qué servicio (para no contradecirse).
+# 16-nov (Alma): el modelo consultó el mismo día con "depilación", luego "corporal" y luego sin
+# servicio; cada consulta daba otra lista → ofrecía 3 pm, luego "ya no, 4 pm", luego "ya no, 9 am".
+_ofrecidos: dict[str, dict[str, dict]] = {}   # tel -> fecha -> {"horas": [...], "servicio": str}
+_servicio_platica: dict[str, str] = {}        # tel -> último servicio con el que se consultó
 
 
-def _recordar_ofrecidos(telefono: str, fecha, libres: list[str]) -> None:
+def _recordar_ofrecidos(telefono: str, fecha, libres: list[str], servicio: str = "") -> None:
     if telefono:
-        _ofrecidos.setdefault(telefono, {})[fecha.isoformat()] = list(libres)
+        _ofrecidos.setdefault(telefono, {})[fecha.isoformat()] = {"horas": list(libres), "servicio": servicio}
+        if servicio:
+            _servicio_platica[telefono] = servicio
 
 
 # Frases que contradicen una cita ya apartada (no se le dicen a quien solo confirma).
@@ -517,6 +524,11 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
                 return (f"El {fecha.isoformat()} el spa está cerrado (domingo o día de descanso/feriado). "
                         "Ofrece otro día.")
             servicio_c = (args.get("servicio") or "").strip()
+            # Sin servicio (o uno que no dice cuál) → el de la plática: si no, la lista cambia
+            # entre una consulta y otra y Sofía se contradice.
+            previo = _servicio_platica.get(telefono or "", "")
+            if previo and (not servicio_c or not calendar_tool.categoria_servicio(servicio_c)):
+                servicio_c = previo
             # Lo que se OFRECE debe poder AGENDARSE después. Antes se consultaba "facial" y se
             # agendaba "Sesión facial sin costo" (regla más estricta) → "ya no está disponible".
             # Por eso: si no dice claramente que es de PAGA, se consulta con la regla de la
@@ -528,9 +540,22 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
             libres = await asyncio.to_thread(
                 calendar_tool.slots_libres, fecha, dur, 60, 8, servicio_c, telefono or "",
             )
-            _recordar_ofrecidos(telefono, fecha, libres)
+            antes = (_ofrecidos.get(telefono or "", {}).get(fecha.isoformat()) or {})
+            _recordar_ofrecidos(telefono, fecha, libres, servicio_c)
+            # Si ya le había ofrecido horas ese día con OTRO servicio y ahora no salen, avisar al
+            # modelo en vez de dejar que diga "ya no tengo".
+            aviso_cambio = ""
+            perdidas = [h for h in antes.get("horas", []) if h not in libres]
+            if perdidas and antes.get("servicio") and antes["servicio"] != servicio_c:
+                aviso_cambio = (
+                    f"OJO: antes consultaste este día como '{antes['servicio']}' y ahora como "
+                    f"'{servicio_c}', por eso cambian las horas ({', '.join(perdidas)}). Si la clienta "
+                    "NO cambió de servicio, vuelve a consultar con EXACTAMENTE "
+                    f"'{antes['servicio']}' y no le digas que ya no hay. Si sí cambió de servicio, "
+                    "explícale que para ese otro servicio la hora es distinta. "
+                )
             ap, ci = hd
-            horario = f"Horario ese día: {ap.strftime('%H:%M')}-{ci.strftime('%H:%M')}. "
+            horario = aviso_cambio + f"Horario ese día: {ap.strftime('%H:%M')}-{ci.strftime('%H:%M')}. "
             # Si la clienta YA tiene cita ese día, se le dice al modelo: esa hora es SUYA.
             try:
                 suyas = [c for c in await asyncio.to_thread(calendar_tool.buscar_citas_de, telefono or "", 30)
@@ -677,6 +702,13 @@ async def _ejecutar_herramienta(nombre: str, args: dict, telefono: str, mensaje:
                 "proactivamente hasta que ella escriba). Despídete con calidez dejando la puerta "
                 "abierta y NO insistas más."
             )
+    except calendar_tool.AgendaNoLeida as e:
+        logger.error(f"Agenda no leída en {nombre}: {e}")
+        return (
+            "NO se pudo leer la agenda en este momento (falla de conexión con Google). NO ofrezcas "
+            "ni confirmes ninguna hora: dile con calidez que en un momento le confirmas el horario "
+            "y vuelve a consultar en tu siguiente respuesta."
+        )
     except Exception as e:  # noqa: BLE001
         logger.error(f"Error en herramienta {nombre}: {e}")
         return "Hubo un problema con la agenda. Toma la solicitud y di que el equipo confirma."
