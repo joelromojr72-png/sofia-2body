@@ -357,6 +357,26 @@ async def ghl_agenda_ahora(tareas: BackgroundTasks, key: str = ""):
     return {"procesando": True, "anterior": dict(ghl_agenda.ultimo)}
 
 
+@app.post("/ghl/espejo")
+async def ghl_espejo_rellenar(tareas: BackgroundTasks, key: str = "", dias: int = 14, hasta_id: int = 0):
+    """Copia a GHL → Conversaciones el historial de WhatsApp de los últimos `dias` (una vez)."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from agent import ghl_espejo
+    tareas.add_task(ghl_espejo.rellenar, max(1, min(dias, 60)), hasta_id or None)
+    return {"procesando": True}
+
+
+@app.get("/ghl/espejo")
+async def ghl_espejo_estado(key: str = ""):
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    from agent import ghl_espejo
+    return {"activo": ghl_espejo.activo(), "en_fila": ghl_espejo.pendientes(), **ghl_espejo.estado}
+
+
 @app.get("/ghl/importar")
 async def ghl_importar_estado(key: str = ""):
     clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
