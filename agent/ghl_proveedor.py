@@ -254,7 +254,9 @@ async def _nombre_usuario(c: httpx.AsyncClient, user_id: str) -> str:
         return _nombres[user_id]
     nombre = ""
     try:
-        r = await c.get(f"/users/{user_id}")
+        r = await c.get(f"/users/{user_id}", headers={"Version": "2021-07-28"})
+        if r.status_code != 200:
+            logger.warning(f"[GHL proveedor] usuario {user_id}: {r.status_code} {r.text[:150]}")
         if r.status_code == 200:
             u = r.json()
             nombre = (u.get("name") or f"{u.get('firstName', '')} {u.get('lastName', '')}").strip()
