@@ -24,6 +24,7 @@ from agent.consola import chat_pausado
 from agent.consola import router as consola_router
 from agent.brain import estado_cerebro, generar_respuesta
 from agent import ghl
+from agent import ghl_proveedor  # noqa: F401  (registra la tabla ghl_token)
 from agent.memory import (
     guardar_mensaje,
     inicializar_db,
@@ -375,6 +376,48 @@ async def ghl_espejo_estado(key: str = ""):
         raise HTTPException(status_code=403, detail="clave invalida")
     from agent import ghl_espejo
     return {"activo": ghl_espejo.activo(), "en_fila": ghl_espejo.pendientes(), **ghl_espejo.estado}
+
+
+@app.get("/ghl/oauth")
+async def ghl_oauth(code: str = ""):
+    """GHL regresa aquí al instalar la app "Sofía WhatsApp" en la sub-cuenta."""
+    from fastapi.responses import HTMLResponse
+
+    if not code:
+        raise HTTPException(status_code=400, detail="falta code")
+    try:
+        r = await ghl_proveedor.instalar(code)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[GHL proveedor] instalación falló: {e}")
+        return HTMLResponse(f"<h2>No se pudo instalar</h2><p>{str(e)[:300]}</p>", status_code=500)
+    return HTMLResponse(
+        "<h2>Listo ✅</h2><p>Sofía WhatsApp quedó conectada a GHL (" + (r.get("locationId") or "") +
+        "). Ya puedes cerrar esta pestaña.</p>")
+
+
+@app.post("/ghl/proveedor")
+async def ghl_proveedor_delivery(request: Request, tareas: BackgroundTasks):
+    """Delivery URL: el equipo escribió en GHL → se manda por WhatsApp."""
+    cuerpo = await request.body()
+    if not ghl_proveedor.firma_valida(cuerpo, request.headers.get("x-ghl-signature")):
+        logger.warning("[GHL proveedor] firma inválida: rechazado")
+        raise HTTPException(status_code=401, detail="firma invalida")
+    import json as _json
+
+    datos = _json.loads(cuerpo or b"{}")
+    mid = datos.get("messageId") or ""
+    if mid and not await marcar_evento_procesado("ghl-" + mid):
+        return {"status": "repetido"}
+    tareas.add_task(ghl_proveedor.entregar, datos)
+    return {"status": "ok"}
+
+
+@app.get("/ghl/proveedor")
+async def ghl_proveedor_estado(key: str = ""):
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    return await ghl_proveedor.info()
 
 
 @app.get("/ghl/importar")

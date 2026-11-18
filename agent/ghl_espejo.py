@@ -86,6 +86,21 @@ async def _copiar(c: httpx.AsyncClient, telefono: str, role: str, content: str, 
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
         cuerpo["date"] = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    # Si la app proveedora está instalada, el mensaje entra por el canal "WhatsApp 2Body"
+    # (así el equipo puede CONTESTAR desde GHL). Si algo falla, cae al tipo WhatsApp de siempre.
+    from agent import ghl_proveedor
+
+    tok = await ghl_proveedor.token() if estado.get("custom", True) else None
+    if tok:
+        custom = {**cuerpo, "type": "Custom", "conversationProviderId": ghl_proveedor.provider_id()}
+        r = await c.post("/conversations/messages/inbound", json=custom, headers=ghl_proveedor.headers(tok))
+        if r.status_code < 400:
+            estado["como_custom"] = estado.get("como_custom", 0) + 1
+            return
+        estado["error_custom"] = f"{r.status_code} {r.text[:200]}"
+        logger.warning(f"[GHL espejo] canal propio falló ({r.status_code}), va como WhatsApp: {r.text[:150]}")
+
     r = await c.post("/conversations/messages/inbound", json=cuerpo)
     if r.status_code == 404 or (r.status_code == 400 and "conversation" in r.text.lower()):
         _conv.pop(telefono, None)  # la borraron en GHL: se crea de nuevo una vez

@@ -304,12 +304,14 @@ async def limpiar_eventos_viejos(dias: int = 7):
         logger.info(f"Se limpiaron {resultado.rowcount} eventos de mas de {dias} dias")
 
 
-async def guardar_mensaje(telefono: str, role: str, content: str):
-    """Guarda un mensaje en el historial de esa conversacion."""
+async def guardar_mensaje(telefono: str, role: str, content: str, espejo: bool = True):
+    """Guarda un mensaje en el historial de esa conversacion (espejo=False: no se copia a GHL)."""
     ts = ahora()
     async with async_session() as session:
         session.add(Mensaje(telefono=telefono, role=role, content=content, timestamp=ts))
         await session.commit()
+    if not espejo:
+        return
     try:  # copia a GHL → Conversaciones (en segundo plano; nunca truena aquí)
         from agent import ghl_espejo
 
