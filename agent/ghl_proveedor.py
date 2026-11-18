@@ -143,7 +143,19 @@ def headers(tok: str) -> dict:
 async def info() -> dict:
     async with async_session() as s:
         fila = await s.get(GhlToken, 1)
+    claims = {}
+    if fila and fila.access_token:
+        try:
+            import json as _j
+            parte = fila.access_token.split(".")[1]
+            parte += "=" * (-len(parte) % 4)
+            c = _j.loads(base64.urlsafe_b64decode(parte))
+            claims = {k: c.get(k) for k in ("authClass", "authClassId", "source", "channel", "primaryAuthClassId")}
+            claims["scopes"] = c.get("oauthMeta", {}).get("scopes") or c.get("scopes")
+        except Exception as e:  # noqa: BLE001
+            claims = {"no_jwt": str(e)[:80]}
     return {
+        "token": claims,
         "configurado": configurado(),
         "instalado": bool(fila and fila.access_token),
         "location": fila.location_id if fila else None,
