@@ -114,26 +114,89 @@ async def instalar(code: str) -> dict:
     return {"ok": True, "locationId": t.get("locationId")}
 
 
+async def _token_fila(fila_id: int) -> GhlToken | None:
+    async with async_session() as s:
+        return await s.get(GhlToken, fila_id)
+
+
+def _vigente(fila: GhlToken | None) -> bool:
+    if fila is None or not fila.access_token:
+        return False
+    exp = fila.expira if fila.expira.tzinfo else fila.expira.replace(tzinfo=timezone.utc)
+    return exp - ahora() > timedelta(minutes=10)
+
+
+async def _token_agencia() -> str | None:
+    """Token de la instalación (fila 1). Si GHL lo dio como agencia (Company), sirve para pedir el de 2Body."""
+    fila = await _token_fila(1)
+    if fila is None or not fila.access_token:
+        return None
+    if _vigente(fila):
+        return fila.access_token
+    t = await _pedir_token({"grant_type": "refresh_token", "refresh_token": fila.refresh_token})
+    await _guardar(t)
+    return t["access_token"]
+
+
 async def token() -> str | None:
-    """Access token vigente de la app (renueva si le quedan <10 min). None si no está instalada."""
+    """
+    Access token de la app para la sub-cuenta 2Body (renueva solo). None si no está instalada.
+    Si la instalación se hizo desde la vista de agencia, GHL entrega un token "Company"; con él se
+    pide el token de la sub-cuenta (POST /oauth/locationToken) y se guarda en la fila 2.
+    """
     if not configurado():
         return None
     async with _candado:
-        async with async_session() as s:
-            fila = await s.get(GhlToken, 1)
-        if fila is None or not fila.access_token:
-            return None
-        exp = fila.expira if fila.expira.tzinfo else fila.expira.replace(tzinfo=timezone.utc)
-        if exp - ahora() > timedelta(minutes=10):
-            return fila.access_token
         try:
-            t = await _pedir_token({"grant_type": "refresh_token", "refresh_token": fila.refresh_token})
-            await _guardar(t)
+            loc = await _token_fila(2)
+            if _vigente(loc):
+                return loc.access_token
+            agencia = await _token_agencia()
+            if not agencia:
+                return None
+            fila = await _token_fila(1)
+            if _clase(agencia) != "Company":
+                return agencia  # ya era de la sub-cuenta
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(f"{API}/oauth/locationToken",
+                                 data={"companyId": _clase_id(agencia), "locationId": os.getenv("GHL_LOCATION_ID", "")},
+                                 headers={"Authorization": f"Bearer {agencia}", "Version": "2021-07-28",
+                                          "Accept": "application/json"})
+            if r.status_code >= 400:
+                raise RuntimeError(f"locationToken {r.status_code}: {r.text[:200]}")
+            t = r.json()
+            async with async_session() as s:
+                f2 = await s.get(GhlToken, 2) or GhlToken(id=2)
+                f2.access_token = t["access_token"]
+                f2.refresh_token = ""
+                f2.location_id = t.get("locationId") or os.getenv("GHL_LOCATION_ID", "")
+                f2.expira = ahora() + timedelta(seconds=int(t.get("expires_in") or 86399))
+                s.add(f2)
+                await s.commit()
             return t["access_token"]
         except Exception as e:  # noqa: BLE001
-            estado["ultimo_error"] = f"renovar token: {e}"
-            logger.error(f"[GHL proveedor] no se pudo renovar el token: {e}")
+            estado["ultimo_error"] = f"token: {e}"[:300]
+            logger.error(f"[GHL proveedor] sin token: {e}")
             return None
+
+
+def _claims(tok: str) -> dict:
+    import json as _j
+
+    try:
+        parte = tok.split(".")[1]
+        parte += "=" * (-len(parte) % 4)
+        return _j.loads(base64.urlsafe_b64decode(parte))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _clase(tok: str) -> str:
+    return _claims(tok).get("authClass", "")
+
+
+def _clase_id(tok: str) -> str:
+    return _claims(tok).get("authClassId", "")
 
 
 def headers(tok: str) -> dict:
@@ -143,14 +206,16 @@ def headers(tok: str) -> dict:
 async def info() -> dict:
     async with async_session() as s:
         fila = await s.get(GhlToken, 1)
-    claims = {}
+    ok = bool(await token())
+    f2 = await _token_fila(2)
+    claims = {"token_ok": ok, "sub_cuenta_lista": _vigente(f2)}
     if fila and fila.access_token:
         try:
             import json as _j
             parte = fila.access_token.split(".")[1]
             parte += "=" * (-len(parte) % 4)
             c = _j.loads(base64.urlsafe_b64decode(parte))
-            claims = {k: c.get(k) for k in ("authClass", "authClassId", "source", "channel", "primaryAuthClassId")}
+            claims.update({k: c.get(k) for k in ("authClass", "authClassId", "source", "channel", "primaryAuthClassId")})
             claims["scopes"] = c.get("oauthMeta", {}).get("scopes") or c.get("scopes")
         except Exception as e:  # noqa: BLE001
             claims = {"no_jwt": str(e)[:80]}
