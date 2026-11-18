@@ -708,8 +708,21 @@ class Webhook(Base):
         self.enviar.assert_not_awaited()
         self.assertEqual((await memory.obtener_historial(TEL))[-1]["content"], "Gracias Ana")
 
-    async def test_horario_equipo_guarda_y_calla(self):
+    async def test_horario_equipo_sofia_contesta_primer_mensaje(self):
         with patch.object(main, "sofia_debe_responder", lambda *_: False):
+            await self.post(payload([texto("a", "Quiero más información")]))
+        self.enviar.assert_awaited_once()
+
+    async def test_horario_equipo_primer_mensaje_se_puede_apagar(self):
+        with patch.object(main, "sofia_debe_responder", lambda *_: False), \
+             patch.object(main, "SOFIA_PRIMER_MENSAJE", False):
+            await self.post(payload([texto("a", "Quiero más información")]))
+        self.enviar.assert_not_awaited()
+
+    async def test_horario_equipo_guarda_y_calla(self):
+        await memory.guardar_mensaje(TEL, "assistant", "[Equipo] Hola, ¿en qué te ayudo?")
+        with patch.object(main, "sofia_debe_responder", lambda *_: False), \
+             patch.object(memory, "equipo_activo_reciente", AsyncMock(return_value=False)):
             await self.post(payload([texto("a", "Quiero más información")]))
         self.enviar.assert_not_awaited()
         self.assertEqual((await memory.obtener_historial(TEL))[-1]["role"], "user")

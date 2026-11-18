@@ -37,6 +37,7 @@ from agent.memory import (
     origenes_anuncio,
     registrar_outbound_equipo,
     equipo_activo_reciente,
+    negocio_ya_respondio,
     reporte_leads,
     ultimas_conversaciones,
 )
@@ -103,6 +104,11 @@ def mensaje_es_viejo(msg: MensajeEntrante) -> bool:
 # OJO: corto a propósito. Antes eran 12 h y, si el equipo contestaba a las 7 pm (desde el cel o
 # la consola), Sofía se quedaba callada TODA la noche en ese chat, que es justo su turno.
 SILENCIO_TRAS_EQUIPO_MIN = int(os.getenv("SOFIA_SILENCIO_TRAS_EQUIPO_MIN") or "45")
+
+# Pedido de Joel (18-nov-2026), tras analizar 591 chats: en horario del equipo Sofía contesta
+# el PRIMER mensaje de una clienta nueva (en segundos, "¿rostro o cuerpo?") y luego el equipo
+# sigue la plática. Contestar en <5 min triplica las citas. Apagar: SOFIA_PRIMER_MENSAJE=0.
+SOFIA_PRIMER_MENSAJE = os.getenv("SOFIA_PRIMER_MENSAJE", "1").strip().lower() not in ("0", "false", "no")
 
 # Tope de respuestas de Sofía por clienta por hora: corta bucles (otro bot contestándole a
 # Sofía) y abusos que gastarían saldo de Anthropic. Pasado el tope, se calla y lo ve el equipo.
@@ -740,7 +746,16 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
             logger.info(f"[mensaje viejo] no se contesta (> {MAX_ANTIGUEDAD_MIN} min): {msg.telefono}: {msg.texto[:60]}")
             continue
 
-        if en_horario_equipo:
+        primer_mensaje = (
+            en_horario_equipo
+            and SOFIA_PRIMER_MENSAJE
+            and not msg.telefono.startswith("msgr:")
+            and msg.contexto.get("tipo") != "media"
+            and not await negocio_ya_respondio(msg.telefono)
+        )
+        if primer_mensaje:
+            logger.info(f"[horario equipo] clienta nueva: Sofía contesta el primer mensaje: {msg.telefono}")
+        elif en_horario_equipo:
             if not msg.telefono.startswith("msgr:"):
                 await registrar_inbound_lead(msg.telefono, msg.texto)
                 # Se guarda en el historial para que Sofía tenga TODO el contexto (lo que dijo

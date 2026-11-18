@@ -543,6 +543,15 @@ async def actualizar_lead(telefono: str, nombre: str = "", interes: str = "") ->
         await s.commit()
 
 
+async def negocio_ya_respondio(telefono: str) -> bool:
+    """True si el negocio (Sofía o el equipo) ya le escribió alguna vez a este teléfono."""
+    async with async_session() as s:
+        fila = (await s.execute(
+            select(Mensaje.id).where(Mensaje.telefono == telefono, Mensaje.role == "assistant").limit(1)
+        )).first()
+    return fila is not None
+
+
 async def registrar_outbound_equipo(telefono: str) -> None:
     """
     Registra que el EQUIPO humano le respondió a esta clienta (echo de coexistencia): marca
