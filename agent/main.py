@@ -379,6 +379,7 @@ async def ghl_espejo_estado(key: str = ""):
 
 
 @app.get("/ghl/oauth")
+@app.get("/conexion/oauth")  # GHL no acepta URLs que digan "ghl"/"highlevel"
 async def ghl_oauth(code: str = ""):
     """GHL regresa aquí al instalar la app "Sofía WhatsApp" en la sub-cuenta."""
     from fastapi.responses import HTMLResponse
@@ -396,6 +397,7 @@ async def ghl_oauth(code: str = ""):
 
 
 @app.post("/ghl/proveedor")
+@app.post("/conexion/entrega")  # misma razón: sin "ghl" en la URL
 async def ghl_proveedor_delivery(request: Request, tareas: BackgroundTasks):
     """Delivery URL: el equipo escribió en GHL → se manda por WhatsApp."""
     cuerpo = await request.body()

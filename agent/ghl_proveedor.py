@@ -4,7 +4,7 @@ Contestar WhatsApp DESDE GoHighLevel (proveedor de conversación propio).
 Cómo funciona:
   • En el portal de desarrolladores de GHL hay una app privada "Sofía WhatsApp" con un
     Conversation Provider tipo SMS marcado como "Custom" (canal extra, no reemplaza el SMS).
-    Su Delivery URL apunta a POST /ghl/proveedor de este servidor.
+    Su Delivery URL apunta a POST /conexion/entrega (= /ghl/proveedor; GHL no acepta 'ghl' en URLs) de este servidor.
   • La app se instala en la sub-cuenta 2Body Pachuca (OAuth): GHL redirige a GET /ghl/oauth con
     un código; se cambia por tokens y se guardan en la base (tabla ghl_token). El token se
     renueva solo antes de vencer.
@@ -74,7 +74,7 @@ def redirect_uri() -> str:
     if r:
         return r
     dominio = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
-    return f"https://{dominio}/ghl/oauth" if dominio else ""
+    return f"https://{dominio}/conexion/oauth" if dominio else ""
 
 
 # ── Tokens ─────────────────────────────────────────────────────────────────────
