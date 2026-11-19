@@ -228,7 +228,13 @@ async def _asegurar_contacto(c: httpx.AsyncClient, cl: dict, cuenta: Counter) ->
     if not contacto:
         contacto = await _por_nombre(c, cl["nombre"])
     if not contacto:
-        cuerpo = {"locationId": ghl._loc(), "name": cl["nombre"], "source": "Anegocios", "tags": ["anegocios"]}
+        partes = cl["nombre"].split()
+        # GHL no acepta contactos solo con "name": hay que mandar nombre y apellido.
+        # Anegocios guarda "APELLIDOS NOMBRE(S)": con 3+ palabras, las dos primeras son apellidos.
+        corte = 2 if len(partes) >= 3 else 1
+        cuerpo = {"locationId": ghl._loc(), "firstName": " ".join(partes[corte:]) or cl["nombre"],
+                  "lastName": " ".join(partes[:corte]) if len(partes) > 1 else "",
+                  "name": cl["nombre"], "source": "Anegocios", "tags": ["anegocios"]}
         if cl["tel"]:
             cuerpo["phone"] = "+521" + cl["tel"]
         if cl["correo"]:
@@ -305,13 +311,17 @@ async def _asegurar_factura(c: httpx.AsyncClient, t: dict, contacto: dict, exist
     ya = float(existente.get("amountPaid") or 0)
     for p in pagos_pendientes(t, ya):
         modo_txt = {"cash": "efectivo", "card": "tarjeta", "bank_transfer": "transferencia"}[p["modo"]]
-        r = await c.post(f"/invoices/{existente['_id']}/record-payment", json={
-            **loc, "mode": p["modo"], "amount": p["monto"], "fulfilledAt": _iso(p["cuando"]),
-            "notes": f"Anegocios ticket {t['folio']} · {modo_txt} · {p['cuando'][:10]}"})
+        for intento in range(4):  # GHL responde 409 si llegan dos pagos seguidos a la misma factura
+            r = await c.post(f"/invoices/{existente['_id']}/record-payment", json={
+                **loc, "mode": p["modo"], "amount": p["monto"], "fulfilledAt": _iso(p["cuando"]),
+                "notes": f"Anegocios ticket {t['folio']} · {modo_txt} · {p['cuando'][:10]}"})
+            if r.status_code != 409:
+                break
+            await asyncio.sleep(4 * (intento + 1))
         r.raise_for_status()
         cuenta["pagos_registrados"] += 1
         cuenta["monto_registrado"] += p["monto"]
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.5)
 
 
 async def sincronizar(datos: dict, pagos: bool = True) -> dict:
