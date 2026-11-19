@@ -353,6 +353,49 @@ async def ghl_anegocios(request: Request, tareas: BackgroundTasks, key: str = ""
     return {"recibidas": len(filas), "procesando": True, "anterior": dict(ghl.ultimo_anegocios)}
 
 
+@app.post("/ghl/anegocios/completo")
+async def ghl_anegocios_completo(request: Request, tareas: BackgroundTasks, key: str = "", pagos: bool = True):
+    """Anegocios completo ({dir, notas, abonos}) → contactos, tarjetas y pagos (facturas) en GHL."""
+    from agent import ghl_anegocios
+
+    clave = os.getenv("ANEGOCIOS_SYNC_KEY") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    datos = await request.json()
+    if not isinstance(datos, dict) or not isinstance(datos.get("notas"), dict):
+        raise HTTPException(status_code=400, detail="se esperaba {dir, notas, abonos}")
+
+    async def correr():
+        ghl_anegocios.ultimo.clear()
+        ghl_anegocios.ultimo.update({"corriendo": True})
+        try:
+            r = await ghl_anegocios.sincronizar(datos, pagos=pagos)
+        except Exception as e:  # noqa: BLE001
+            r = {"error": str(e)[:300]}
+        try:
+            r["meta"] = await ghl.ciclo_ventas_ghl()
+        except Exception as e:  # noqa: BLE001
+            r["meta"] = str(e)[:200]
+        ghl_anegocios.ultimo.clear()
+        ghl_anegocios.ultimo.update(r)
+        logger.info(f"[Anegocios→GHL completo] {r}")
+
+    anterior = dict(ghl_anegocios.ultimo)
+    tareas.add_task(correr)
+    return {"clientas": len(datos.get("dir") or []), "tickets": len(datos["notas"]), "procesando": True,
+            "anterior": anterior}
+
+
+@app.get("/ghl/anegocios/completo")
+async def ghl_anegocios_completo_estado(key: str = ""):
+    from agent import ghl_anegocios
+
+    clave = os.getenv("ANEGOCIOS_SYNC_KEY") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    return dict(ghl_anegocios.ultimo)
+
+
 @app.post("/ghl/agenda")
 async def ghl_agenda_ahora(tareas: BackgroundTasks, key: str = ""):
     """Corre ya la revisión de Google Calendar → GHL (normalmente corre sola cada 6 h)."""
