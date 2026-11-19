@@ -139,6 +139,31 @@ def monto(datos: dict) -> str:
     return f"${v:,.2f}".replace(".00", "")
 
 
+_aprobadas: dict = {"en": None, "nombres": set()}
+
+
+async def plantilla_aprobada(nombre_meta: str) -> bool:
+    """¿Meta ya aprobó la plantilla? (se consulta cada 30 min; si no se puede saber, se asume que sí)."""
+    import httpx
+
+    token = os.getenv("META_ACCESS_TOKEN") or ""
+    waba = os.getenv("META_WABA_ID") or "1783295019696260"
+    if not token:
+        return True
+    if not _aprobadas["en"] or datetime.now(timezone.utc) - _aprobadas["en"] > timedelta(minutes=30):
+        try:
+            async with httpx.AsyncClient(timeout=20) as c:
+                r = await c.get(f"https://graph.facebook.com/{os.getenv('META_API_VERSION') or 'v25.0'}/{waba}/message_templates",
+                                params={"fields": "name,status", "limit": 200, "access_token": token})
+            if r.status_code == 200:
+                _aprobadas["nombres"] = {t["name"] for t in r.json().get("data", []) if t.get("status") == "APPROVED"}
+                _aprobadas["en"] = datetime.now(timezone.utc)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[GHL→WhatsApp] no pude consultar plantillas: {e}")
+            return True
+    return not _aprobadas["en"] or nombre_meta in _aprobadas["nombres"]
+
+
 def en_horario(now: datetime | None = None) -> bool:
     now = now or datetime.now(TZ)
     return 9 <= now.hour < 20
@@ -186,7 +211,9 @@ async def _verificar(corto: str, contact_id: str) -> tuple[dict | None, list[str
             if not any(o.get("pipelineStageId") in validas and o.get("status", "open") == "open" for o in ops):
                 return None, [], "ya_no_esta_en_valoracion"
         elif corto == "reactivacion":
-            if "reactivar" not in {t.lower() for t in (con.get("tags") or [])}:
+            # El workflow quita `reactivar` y pone `reactivacion_enviada` justo después de
+            # llamar aquí; si el aviso quedó guardado para más tarde, vale cualquiera de las dos.
+            if not {"reactivar", "reactivacion_enviada"} & {t.lower() for t in (con.get("tags") or [])}:
                 return None, [], "sin_etiqueta_reactivar"
         elif corto == "cumpleanos":
             dob = (con.get("dateOfBirth") or "")[:10]
@@ -203,12 +230,14 @@ async def enviar(corto: str, datos: dict, proveedor) -> dict:
     if corto not in PLANTILLAS:
         return {"status": "plantilla_desconocida", "validas": sorted(PLANTILLAS)}
     contact_id = _campo(datos, "contact_id", "contactId")
-    if not en_horario():
+    if not en_horario() or not await plantilla_aprobada(PLANTILLAS[corto][0]):
+        # Fuera de horario, o Meta aún no aprueba la plantilla: se guarda y se reintenta
+        # (cada 10 min en horario, hasta 3 días).
         async with async_session() as ses:
             ses.add(PendienteWA(corto=corto, datos=json.dumps({"contact_id": contact_id})))
             await ses.commit()
         estado["programados"] += 1
-        return {"status": "programado_9am"}
+        return {"status": "programado"}
 
     try:
         ghl_datos, params, error = await _verificar(corto, contact_id)
@@ -262,17 +291,21 @@ async def enviar_pendientes(proveedor) -> int:
     """Manda lo que quedó guardado fuera de horario (los de hace más de 3 días se descartan)."""
     if not en_horario():
         return 0
+    limite = ahora() - timedelta(days=3)
+    listos = []
     async with async_session() as ses:
-        filas = list((await ses.execute(select(PendienteWA).order_by(PendienteWA.id))).scalars())
-        await ses.execute(delete(PendienteWA).where(PendienteWA.id.in_([f.id for f in filas])))
+        for f in list((await ses.execute(select(PendienteWA).order_by(PendienteWA.id))).scalars()):
+            creado = f.creado if f.creado.tzinfo else f.creado.replace(tzinfo=timezone.utc)
+            if creado < limite:
+                await ses.delete(f)  # más de 3 días: ya no tiene sentido
+            elif f.corto in PLANTILLAS and await plantilla_aprobada(PLANTILLAS[f.corto][0]):
+                listos.append((f.corto, f.datos))
+                await ses.delete(f)
+            # si la plantilla sigue sin aprobar, se queda (conserva su fecha original)
         await ses.commit()
     n = 0
-    limite = ahora() - timedelta(days=3)
-    for f in filas:
-        creado = f.creado if f.creado.tzinfo else f.creado.replace(tzinfo=timezone.utc)
-        if creado < limite:
-            continue
-        r = await enviar(f.corto, json.loads(f.datos), proveedor)
+    for corto, datos in listos:
+        r = await enviar(corto, json.loads(datos), proveedor)
         n += r.get("status") == "enviado"
         await asyncio.sleep(1.5)
     return n
@@ -325,6 +358,8 @@ async def ciclo_reactivacion(dias: int = 45) -> dict:
 
     if not ghl.activo():
         return {"activo": False}
+    if not await plantilla_aprobada(PLANTILLAS["reactivacion"][0]):
+        return {"esperando": "plantilla reactivacion_clienta sin aprobar"}
     tels, textos = await asyncio.to_thread(_ocupadas, dias, 60)
     corte = datetime.now(timezone.utc) - timedelta(days=dias)
     marcadas, revisadas = [], 0
@@ -374,7 +409,7 @@ async def loop(proveedor, intervalo_seg: int = 600) -> None:
         try:
             await enviar_pendientes(proveedor)
             hoy = datetime.now(TZ)
-            if (hoy.hour >= 10 and ultimo_dia != hoy.date().isoformat()
+            if (10 <= hoy.hour < 18 and ultimo_dia != hoy.date().isoformat()
                     and os.getenv("REACTIVACION_ENABLED", "1") not in ("0", "false", "no")):
                 ultimo_dia = hoy.date().isoformat()
                 estado["reactivacion"] = await ciclo_reactivacion()
