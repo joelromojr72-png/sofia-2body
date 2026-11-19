@@ -215,10 +215,12 @@ def _confirm_template() -> str:
 def _debe_confirmar_ahora(now: datetime | None = None) -> bool:
     """
     Recordatorio del día antes: es un aviso automático (no una charla), así que corre
-    también en horario del equipo. Todos los días de 10:00 a 20:00.
+    también en horario del equipo. Sale a las 9:00 para todas las citas de mañana (el ciclo
+    corre cada ~15 min); las que se agenden después de las 9 lo reciben en el siguiente
+    ciclo, hasta las 20:00.
     """
     now = now or datetime.now(TZ)
-    return 10 <= now.hour < 20
+    return 9 <= now.hour < 20
 
 
 _SERVICIO_POR_CALENDARIO = {

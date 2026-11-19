@@ -25,6 +25,7 @@ from agent.consola import router as consola_router
 from agent.brain import estado_cerebro, generar_respuesta
 from agent import ghl
 from agent import ghl_proveedor  # noqa: F401  (registra la tabla ghl_token)
+from agent import ghl_whatsapp  # noqa: F401  (registra la tabla pendiente_wa)
 from agent.memory import (
     guardar_mensaje,
     inicializar_db,
@@ -235,6 +236,9 @@ async def lifespan(app: FastAPI):
         # Citas de Google Calendar → etapa de la tarjeta en GHL.
         from agent import ghl_agenda
         asyncio.create_task(ghl_agenda.loop())
+        # Automatizaciones de GHL por WhatsApp: pendientes de la noche (9:00) y reactivación.
+        from agent import ghl_whatsapp
+        asyncio.create_task(ghl_whatsapp.loop(proveedor))
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
 
@@ -394,6 +398,32 @@ async def ghl_anegocios_completo_estado(key: str = ""):
     if not clave or key != clave:
         raise HTTPException(status_code=403, detail="clave invalida")
     return dict(ghl_anegocios.ultimo)
+
+
+@app.post("/ghl/whatsapp")
+@app.post("/conexion/whatsapp")  # por si GHL no acepta "ghl" en la URL del webhook
+async def ghl_whatsapp(request: Request, key: str = "", plantilla: str = ""):
+    """Acción Webhook de un workflow de GHL → plantilla de WhatsApp desde el número de 2Body."""
+    from agent import ghl_whatsapp as gw
+
+    if not gw.clave_valida(key):
+        raise HTTPException(status_code=403, detail="clave invalida")
+    try:
+        datos = await request.json()
+    except Exception:  # noqa: BLE001
+        datos = {}
+    if not isinstance(datos, dict):
+        datos = {}
+    return await gw.enviar(plantilla, datos, proveedor)
+
+
+@app.get("/ghl/whatsapp")
+async def ghl_whatsapp_estado(key: str = ""):
+    from agent import ghl_whatsapp as gw
+
+    if not gw.clave_valida(key):
+        raise HTTPException(status_code=403, detail="clave invalida")
+    return {**gw.estado, "plantillas": {k: v[0] for k, v in gw.PLANTILLAS.items()}}
 
 
 @app.post("/ghl/agenda")
