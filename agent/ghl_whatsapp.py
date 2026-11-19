@@ -3,11 +3,18 @@ Automatizaciones de GHL que salen por WhatsApp (en lugar de SMS).
 
 En un workflow de GHL, donde iría "Send SMS", se pone una acción **Webhook** (POST) a:
 
-    https://<dominio>/ghl/whatsapp?key=<GHL_WA_KEY>&plantilla=<nombre corto>
+    https://<dominio>/conexion/whatsapp?plantilla=<nombre corto>
 
-GHL manda en el cuerpo los datos de la clienta (phone, first_name, contact_id...). Aquí se
-elige la plantilla aprobada por Meta, se llenan sus variables y Sofía la manda desde el número
-de 2Body. El mensaje queda en el historial (y por el espejo, en Conversaciones de GHL).
+GHL manda en el cuerpo los datos de la clienta (contact_id, phone, first_name...). La URL NO
+lleva clave: en vez de confiar en quien llama, Sofía lee la clienta DIRECTO de GHL (por su
+contact_id, con su propio token) y solo manda si GHL confirma el motivo:
+  • pago_recibido   → hay un pago de esa clienta en GHL en las últimas 48 h (el monto sale de ahí)
+  • valoracion_dN   → su tarjeta sigue en "Valoración realizada" o "Reactivación"
+  • reactivacion    → tiene la etiqueta `reactivar`
+  • cumpleanos      → su fecha de nacimiento en GHL es hoy
+El teléfono y el nombre también salen de GHL, no del cuerpo. Así nadie puede usar el endpoint
+para mandar mensajes a números ajenos ni fuera de motivo. El mensaje queda en el historial (y
+por el espejo, en Conversaciones de GHL).
 
 Reglas de seguridad:
   • Solo plantillas de esta lista (nada de texto libre: fuera de 24 h WhatsApp no lo permite).
@@ -86,8 +93,8 @@ class PendienteWA(Base):
     creado: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=ahora)
 
 
-def clave_valida(key: str) -> bool:
-    clave = os.getenv("GHL_WA_KEY") or ""
+def clave_admin(key: str) -> bool:
+    clave = os.getenv("ADMIN_KEY") or ""
     return bool(clave) and key == clave
 
 
@@ -137,22 +144,55 @@ def en_horario(now: datetime | None = None) -> bool:
     return 9 <= now.hour < 20
 
 
-async def _monto_ultimo_pago(contact_id: str) -> str:
-    """Si GHL no mandó el monto, se busca el último pago de la clienta en GHL."""
-    if not contact_id:
-        return ""
+async def _verificar(corto: str, contact_id: str) -> tuple[dict | None, list[str], str]:
+    """Lee la clienta en GHL y confirma el motivo. (datos, params, error)."""
     from agent import ghl
 
-    try:
-        async with ghl._cliente() as c:
+    if not contact_id or not ghl.activo():
+        return None, [], "sin_contacto"
+    async with ghl._cliente() as c:
+        r = await c.get(f"/contacts/{contact_id}")
+        if r.status_code != 200:
+            return None, [], "contacto_no_existe"
+        con = r.json().get("contact") or {}
+        datos = {"phone": con.get("phone") or "", "first_name": con.get("firstName") or "",
+                 "full_name": con.get("contactName") or con.get("name") or ""}
+        params = [nombre(datos)]
+        hoy = datetime.now(TZ)
+        if corto == "pago_recibido":
             r = await c.get("/payments/transactions", params={
-                "altId": ghl._loc(), "altType": "location", "contactId": contact_id, "limit": 1})
-            datos = r.json() if r.status_code == 200 else {}
-        tx = (datos.get("data") or [{}])[0]
-        return monto({"monto": tx.get("amount")})
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"[GHL→WhatsApp] no pude leer el último pago: {e}")
-        return ""
+                "altId": ghl._loc(), "altType": "location", "contactId": contact_id, "limit": 5})
+            txs = (r.json().get("data") if r.status_code == 200 else None) or []
+            limite = datetime.now(timezone.utc) - timedelta(hours=48)
+            reciente = None
+            for tx in txs:
+                try:
+                    f = datetime.fromisoformat((tx.get("createdAt") or "").replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if f >= limite and (tx.get("status") in (None, "succeeded", "paid")):
+                    reciente = tx
+                    break
+            m = monto({"monto": (reciente or {}).get("amount")})
+            if not m:
+                return None, [], "sin_pago_reciente"
+            params.append(m)
+        elif corto.startswith("valoracion_"):
+            pipe = await ghl._cargar_pipeline(c)
+            validas = {pipe["etapas"][k][0] for k in ("realizada", "reactivacion") if k in pipe["etapas"]}
+            r = await c.get("/opportunities/search", params={
+                "location_id": ghl._loc(), "pipeline_id": pipe["id"], "contact_id": contact_id, "limit": 20})
+            ops = r.json().get("opportunities", []) if r.status_code == 200 else []
+            if not any(o.get("pipelineStageId") in validas and o.get("status", "open") == "open" for o in ops):
+                return None, [], "ya_no_esta_en_valoracion"
+        elif corto == "reactivacion":
+            if "reactivar" not in {t.lower() for t in (con.get("tags") or [])}:
+                return None, [], "sin_etiqueta_reactivar"
+        elif corto == "cumpleanos":
+            dob = (con.get("dateOfBirth") or "")[:10]
+            if dob[5:] != hoy.strftime("%m-%d"):
+                return None, [], "no_es_su_cumpleanos"
+    return datos, params, ""
 
 
 async def enviar(corto: str, datos: dict, proveedor) -> dict:
@@ -162,29 +202,31 @@ async def enviar(corto: str, datos: dict, proveedor) -> dict:
     estado["recibidos"] += 1
     if corto not in PLANTILLAS:
         return {"status": "plantilla_desconocida", "validas": sorted(PLANTILLAS)}
-    tel = telefono(datos)
-    if not tel:
-        estado["omitidos"] += 1
-        return {"status": "sin_telefono"}
+    contact_id = _campo(datos, "contact_id", "contactId")
     if not en_horario():
         async with async_session() as ses:
-            ses.add(PendienteWA(corto=corto, datos=json.dumps(datos, ensure_ascii=False)[:20000]))
+            ses.add(PendienteWA(corto=corto, datos=json.dumps({"contact_id": contact_id})))
             await ses.commit()
         estado["programados"] += 1
         return {"status": "programado_9am"}
+
+    try:
+        ghl_datos, params, error = await _verificar(corto, contact_id)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"[GHL→WhatsApp] no pude verificar en GHL: {e}")
+        ghl_datos, params, error = None, [], "error_ghl"
+    if error:
+        estado["omitidos"] += 1
+        return {"status": error}
+    tel = telefono(ghl_datos)
+    if not tel:
+        estado["omitidos"] += 1
+        return {"status": "sin_telefono"}
     if await memory.estado_lead(tel[-10:]) == "opt_out":
         estado["omitidos"] += 1
         return {"status": "pidio_baja"}
 
     plantilla, texto = PLANTILLAS[corto]
-    params = [nombre(datos)]
-    if corto == "pago_recibido":
-        m = monto(datos) or await _monto_ultimo_pago(_campo(datos, "contact_id", "contactId", "id"))
-        if not m:
-            estado["omitidos"] += 1
-            return {"status": "sin_monto"}
-        params.append(m)
-
     hoy = datetime.now(TZ).date().isoformat()
     clave = f"ghlwa:{corto}:{tel[-10:]}:{hoy}" + (f":{params[1]}" if len(params) > 1 else "")
     if not await memory.marcar_evento_procesado(clave):

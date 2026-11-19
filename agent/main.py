@@ -402,12 +402,13 @@ async def ghl_anegocios_completo_estado(key: str = ""):
 
 @app.post("/ghl/whatsapp")
 @app.post("/conexion/whatsapp")  # por si GHL no acepta "ghl" en la URL del webhook
-async def ghl_whatsapp(request: Request, key: str = "", plantilla: str = ""):
-    """Acción Webhook de un workflow de GHL → plantilla de WhatsApp desde el número de 2Body."""
+async def ghl_whatsapp(request: Request, plantilla: str = ""):
+    """
+    Acción Webhook de un workflow de GHL → plantilla de WhatsApp desde el número de 2Body.
+    Sin clave: Sofía verifica en GHL (con su token) que la clienta y el motivo sean reales.
+    """
     from agent import ghl_whatsapp as gw
 
-    if not gw.clave_valida(key):
-        raise HTTPException(status_code=403, detail="clave invalida")
     try:
         datos = await request.json()
     except Exception:  # noqa: BLE001
@@ -421,7 +422,7 @@ async def ghl_whatsapp(request: Request, key: str = "", plantilla: str = ""):
 async def ghl_whatsapp_estado(key: str = ""):
     from agent import ghl_whatsapp as gw
 
-    if not gw.clave_valida(key):
+    if not gw.clave_admin(key):
         raise HTTPException(status_code=403, detail="clave invalida")
     return {**gw.estado, "plantillas": {k: v[0] for k, v in gw.PLANTILLAS.items()}}
 
