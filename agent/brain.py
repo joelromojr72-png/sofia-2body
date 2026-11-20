@@ -308,7 +308,7 @@ _NOTA_ANUNCIO_BUEN_FIN = (
     "\n\n[NOTA INTERNA — no la menciones: viene del anuncio «{titulo}», que promete precios especiales "
     "de Buen Fin y agendar valoración, NO una sesión gratis: no le ofrezcas primera sesión sin costo. "
     "Si ya preguntó algo concreto, contéstalo primero. Usa consultar_disponibilidad y en UN solo "
-    "mensaje salúdala, dile que los precios de Buen Fin son del 13 al 17 de noviembre, que su "
+    "mensaje salúdala, dile que los precios de Buen Fin siguen hasta el 30 de noviembre, que su "
     "valoración es sin costo y ofrécele dos horarios. Si el título ya dice qué le interesa, no le "
     "preguntes rostro o cuerpo.]"
 )

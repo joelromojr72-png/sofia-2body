@@ -104,11 +104,11 @@ class Promos(unittest.TestCase):
         antes = self.bloque(2026, 11, 12, 21, 0)
         self.assertIn("TODAVÍA NO EMPIEZA", antes)
         self.assertIn("4,999", antes)
-        for dia in (13, 17):
+        for dia in (13, 17, 18, 30):
             b = self.bloque(2026, 11, dia, 12, 0)
-            self.assertIn("VIGENTE, termina el 17 de noviembre", b)
+            self.assertIn("VIGENTE, termina el 30 de noviembre", b)
             self.assertIn("10,000", b)
-        despues = self.bloque(2026, 11, 18, 0, 5)
+        despues = self.bloque(2026, 12, 1, 0, 5)
         self.assertNotIn("4,999", despues)
         self.assertIn("Buen Fin", despues)
         self.assertIn("YA TERMINARON", despues)
@@ -120,7 +120,9 @@ class Promos(unittest.TestCase):
         self.assertTrue(self.vencida("12 sesiones por $6,500", 2026, 11, 4, 21, 0))
         self.assertIsNone(self.vencida("12 sesiones por $6,500", 2026, 10, 30, 21, 0))
         self.assertIsNone(self.vencida("Faciales 12 sesiones $4,999", 2026, 11, 14, 21, 0))
-        self.assertTrue(self.vencida("Faciales 12 sesiones $4,999", 2026, 11, 18, 21, 0))
+        # Buen Fin extendido hasta el 30 de noviembre.
+        self.assertIsNone(self.vencida("Faciales 12 sesiones $4,999", 2026, 11, 18, 21, 0))
+        self.assertTrue(self.vencida("Faciales 12 sesiones $4,999", 2026, 12, 1, 9, 0))
         # Precios de lista que se parecen a los de promo: no deben bloquearse.
         for t in ("$6,580", "$16,500", "$14,000", "$1,000"):
             self.assertIsNone(self.vencida(t, 2026, 11, 4, 21, 0), t)
@@ -223,10 +225,10 @@ class AnuncioYDuracion(unittest.IsolatedAsyncioTestCase):
         with patch.object(brain, "datetime", reloj(2026, 11, 4, 21, 0)):
             nota = await self._nota("5210000000901", "¡Buen Fin de tratamientos corporales! 🔥")
         self.assertIn("no le ofrezcas primera sesión", nota)
-        self.assertIn("13 al 17", nota)
+        self.assertIn("30 de noviembre", nota)
 
     async def test_anuncio_buen_fin_terminado_sin_nota(self):
-        with patch.object(brain, "datetime", reloj(2026, 11, 18, 21, 0)):
+        with patch.object(brain, "datetime", reloj(2026, 12, 1, 9, 0)):
             self.assertEqual(await self._nota("5210000000902", "¡Buen Fin de depilación láser! 🔥"), "")
 
     async def test_anuncio_normal_y_sin_anuncio_siguen_igual(self):

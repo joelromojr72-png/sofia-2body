@@ -423,8 +423,8 @@ promociones:
         confirma la especialista en su valoración.
       Su primera sesión (Experiencia Única) sigue siendo sin costo, y ahí la especialista le
       confirma cuántas sesiones necesita. Si pregunta por meses sin intereses, dile que sí, con
-      tarjeta de crédito (los plazos exactos según su banco se los confirma el equipo). Del 13 al 17 de noviembre también corre el Buen Fin (abajo): si
-      pregunta en esas fechas, dale la que le convenga más; no se juntan.
+      tarjeta de crédito (los plazos exactos según su banco se los confirma el equipo). Además siguen los precios de Buen Fin, extendidos hasta el 30 de noviembre (abajo): dale la
+      que le convenga más; no se juntan.
     frases_vencida:
       - '(?<![\d,])5,?040\b'
       - '(?<![\d,])8,?600\b'
@@ -434,10 +434,11 @@ promociones:
       - '40\s?%\s?\+\s?20'
   - nombre: "Buen Fin"
     desde: 2026-11-13
-    hasta: 2026-11-17
+    hasta: 2026-11-30
     avisar_desde: 2026-11-01
     contenido: |
-      Precios que solo aplican del 13 al 17 de noviembre de 2026. Condiciones (dilas con ligereza):
+      Buen Fin EXTENDIDO: los mismos precios del Buen Fin (13-17 nov) siguen hasta el 30 de noviembre de 2026.
+      Condiciones (dilas con ligereza):
       aplican restricciones, no aplica con otras promociones y es previa valoración.
       - TODOS LOS FACIALES: 12 sesiones $4,999 · 18 sesiones $6,499 · 24 sesiones $8,593
       - TODOS LOS CORPORALES: 12 sesiones $5,075 · 18 sesiones $6,580 · 24 sesiones $9,450
