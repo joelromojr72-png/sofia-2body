@@ -22,7 +22,7 @@ from fastapi.responses import PlainTextResponse
 from agent import atribucion, followup
 from agent.consola import chat_pausado
 from agent.consola import router as consola_router
-from agent.brain import estado_cerebro, generar_respuesta
+from agent.brain import estado_cerebro, generar_respuesta, separar_botones
 from agent import ghl
 from agent import ghl_proveedor  # noqa: F401  (registra la tabla ghl_token)
 from agent import ghl_whatsapp  # noqa: F401  (registra la tabla pendiente_wa)
@@ -962,7 +962,12 @@ async def procesar_mensaje(msg: MensajeEntrante, prov):
                 logger.info(f"[equipo entró mientras Sofía pensaba] no se envía su respuesta: {msg.telefono}")
                 return
 
-            enviado = await prov.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
+            # Si Sofía pidió botones ([BOTONES: a | b]), sale como mensaje con botones.
+            respuesta, botones = separar_botones(respuesta)
+            if botones:
+                enviado = await prov.enviar_botones(msg.telefono, respuesta, botones, msg.contexto)
+            else:
+                enviado = await prov.enviar_mensaje(msg.telefono, respuesta, msg.contexto)
 
             if not enviado:
                 # El evento se marco como procesado ANTES de llegar hasta aca, para que dos

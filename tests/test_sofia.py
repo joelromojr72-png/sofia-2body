@@ -1278,3 +1278,61 @@ class UnaCosmetologa(unittest.TestCase):
         self.assertEqual(calendar_tool.tope_citas(_t(9, 0)), 1)
         self.assertEqual(calendar_tool.tope_citas(_t(19, 0)), 1)
         self.assertEqual(calendar_tool.tope_citas(_t(11, 0)), calendar_tool.MAX_CITAS_SIMULTANEAS)
+
+
+class BotonesWhatsApp(unittest.TestCase):
+    """19-nov: botones de respuesta rápida para el 37% que no contesta el primer mensaje."""
+
+    def test_separa_marca_y_botones(self):
+        from agent.brain import separar_botones
+        t, b = separar_botones("Tengo jueves 5:00 pm o viernes 11:00 am, ¿cuál le acomoda?\n[BOTONES: Jue 20, 5:00 pm | Vie 21, 11:00 am | Otro horario]")
+        self.assertEqual(t, "Tengo jueves 5:00 pm o viernes 11:00 am, ¿cuál le acomoda?")
+        self.assertEqual(b, ["Jue 20, 5:00 pm", "Vie 21, 11:00 am", "Otro horario"])
+
+    def test_sin_marca(self):
+        from agent.brain import separar_botones
+        self.assertEqual(separar_botones("Hola"), ("Hola", []))
+
+    def test_botones_invalidos_salen_como_texto(self):
+        from agent.brain import separar_botones
+        # uno solo, demasiado largo, o más de 3: se quita la marca y va sin botones
+        for marca in ("[BOTONES: Solo uno]", "[BOTONES: Una opción larguísima de verdad | Otra]",
+                      "[BOTONES: a1 | b2 | c3 | d4]"):
+            t, b = separar_botones("Texto\n" + marca)
+            self.assertEqual((t, b), ("Texto", []), marca)
+
+    def test_duplicados_se_quitan(self):
+        from agent.brain import separar_botones
+        self.assertEqual(separar_botones("x [BOTONES: Sí | sí | No]")[1], ["Sí", "No"])
+
+    def test_meta_arma_interactive(self):
+        import asyncio
+        from agent.providers.meta import ProveedorMeta
+        prov = ProveedorMeta()
+        prov.access_token, prov.phone_number_id = "t", "1"
+        enviado = {}
+
+        class R:
+            status_code = 200
+            text = ""
+
+        class C:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def post(self, url, json=None, headers=None):
+                enviado.update(json)
+                return R()
+
+        with patch("agent.providers.meta.httpx.AsyncClient", C):
+            ok = asyncio.run(prov.enviar_botones("521", "¿Cuál?", ["Jue 5 pm", "Vie 11 am"]))
+        self.assertTrue(ok)
+        self.assertEqual(enviado["type"], "interactive")
+        self.assertEqual([x["reply"]["title"] for x in enviado["interactive"]["action"]["buttons"]],
+                         ["Jue 5 pm", "Vie 11 am"])
+
+    def test_respuesta_de_boton_llega_como_texto(self):
+        from agent.providers.meta import _texto_de_mensaje
+        msg = {"type": "interactive", "interactive": {"type": "button_reply",
+               "button_reply": {"id": "op1", "title": "Jue 20, 5:00 pm"}}}
+        self.assertEqual(_texto_de_mensaje(msg), "Jue 20, 5:00 pm")

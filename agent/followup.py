@@ -139,8 +139,12 @@ async def _ciclo_nudge(proveedor) -> int:
         if not texto:
             # no marcamos enviado: se reintenta el próximo ciclo
             continue
+        texto, botones = brain.separar_botones(texto)
         try:
-            ok = await proveedor.enviar_mensaje(tel, texto)
+            if botones:
+                ok = await proveedor.enviar_botones(tel, texto, botones)
+            else:
+                ok = await proveedor.enviar_mensaje(tel, texto)
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error enviando toque de cierre a {tel}: {e}")
             ok = False

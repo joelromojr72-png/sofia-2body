@@ -42,6 +42,15 @@ class ProveedorWhatsApp(ABC):
         """Envia un mensaje de texto. Retorna True si salio bien."""
         ...
 
+    async def enviar_botones(
+        self, telefono: str, mensaje: str, botones: list[str], contexto: dict | None = None
+    ) -> bool:
+        """
+        Mensaje con botones de respuesta rápida. Por defecto (proveedores sin botones) manda
+        solo el texto: las opciones ya vienen escritas dentro del mensaje.
+        """
+        return await self.enviar_mensaje(telefono, mensaje, contexto)
+
     async def verificar_firma(self, request: Request) -> bool:
         """
         Confirma que el webhook viene de verdad del proveedor.

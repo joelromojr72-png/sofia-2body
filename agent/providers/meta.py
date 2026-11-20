@@ -238,6 +238,56 @@ class ProveedorMeta(ProveedorWhatsApp):
         logger.error(f"Meta rechazo el envio [{r.status_code}]: {r.text[:500]}")
         return False
 
+    async def enviar_botones(
+        self, telefono: str, mensaje: str, botones: list[str], contexto: dict | None = None
+    ) -> bool:
+        """
+        Mensaje "interactive" con hasta 3 botones de respuesta rápida (solo dentro de la
+        ventana de 24 h, no necesita plantilla). Cuando la clienta toca uno, llega como
+        mensaje con el título del botón (lo lee _texto_de_mensaje). Si Meta lo rechaza,
+        se manda el texto solo para que la clienta no se quede sin respuesta.
+        """
+        if not self.access_token or not self.phone_number_id:
+            logger.error("No se puede enviar: faltan META_ACCESS_TOKEN o META_PHONE_NUMBER_ID")
+            return False
+        if not botones:
+            return await self.enviar_mensaje(telefono, mensaje, contexto)
+
+        url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
+        cuerpo = {
+            "messaging_product": "whatsapp",
+            "to": telefono,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": mensaje[:1024]},
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": f"op{i + 1}", "title": b[:20]}}
+                        for i, b in enumerate(botones[:3])
+                    ]
+                },
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as cliente:
+                r = await cliente.post(
+                    url,
+                    json=cuerpo,
+                    headers={
+                        "Authorization": f"Bearer {self.access_token}",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except httpx.HTTPError as e:
+            logger.error(f"Error de red enviando botones: {e}")
+            return await self.enviar_mensaje(telefono, mensaje, contexto)
+
+        if r.status_code == 200:
+            return True
+        logger.warning(f"Meta rechazo los botones [{r.status_code}]: {r.text[:300]}; va como texto")
+        return await self.enviar_mensaje(telefono, mensaje, contexto)
+
     # -- Plantillas (seguimiento fuera de la ventana de 24 h) -------------
 
     async def enviar_plantilla(

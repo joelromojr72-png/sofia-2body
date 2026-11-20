@@ -99,11 +99,11 @@ ANUNCIOS = {
 # id, fecha, historial [(rol, texto)], mensaje, debe_decir[], no_debe_decir[]
 ESCENARIOS = [
     ("anuncio_bf_corporal", NOCHE, [], "Quiero más información",
-     [r"13", r"valoraci", r"\d{1,2}(:\d\d)?"], [r"primera sesi[oó]n", r"rostro o (para )?cuerpo", OCT, TUTEO]),
+     [r"30 de noviembre", r"valoraci", r"\d{1,2}(:\d\d)?"], [r"primera sesi[oó]n", r"rostro o (para )?cuerpo", OCT, TUTEO]),
     ("anuncio_bf_facial", NOCHE, [], "Quiero más información",
-     [r"13", r"valoraci"], [r"primera sesi[oó]n", r"rostro o (para )?cuerpo", OCT, TUTEO]),
+     [r"30 de noviembre", r"valoraci"], [r"primera sesi[oó]n", r"rostro o (para )?cuerpo", OCT, TUTEO]),
     ("anuncio_bf_pregunta", NOCHE, [], "Bajar talla",
-     [r"13|valoraci"], [r"primera sesi[oó]n", OCT, TUTEO]),
+     [r"30 de noviembre|valoraci"], [r"primera sesi[oó]n", OCT, TUTEO]),
     ("anuncio_bf_despues", DESPUES_BF, [], "Quiero más información",
      [], [PRECIOS_BF, OCT, TUTEO]),
     ("msi", NOCHE, [("user", "Hola"), ("assistant", "¡Hola! Soy Sofía de 2 Body Pachuca 💜")],

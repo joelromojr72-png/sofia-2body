@@ -342,6 +342,51 @@ def _prompt_sin_agenda() -> str:
     return cargar_system_prompt() + _contexto_temporal() + _bloque_promociones()
 
 
+# ─────────────── Botones de respuesta rápida (WhatsApp) ───────────────
+# El 37% de quien llega por anuncio no contesta el 1er mensaje de Sofía. Con botones basta un
+# toque para elegir horario (19-nov). Sofía los pide con una marca al final y main.py la quita
+# y manda el mensaje como "interactive"; si algo no cuadra, sale como texto normal.
+_INSTRUCCION_BOTONES = (
+    "\n\n## Botones de WhatsApp\n"
+    "Cuando tu mensaje le pida ELEGIR entre 2 o 3 opciones concretas (sobre todo los dos horarios "
+    "que le ofreces, o rostro/cuerpo), agrega AL FINAL una última línea así:\n"
+    "[BOTONES: opción 1 | opción 2 | opción 3]\n"
+    "La clienta los ve como botones y con un toque contesta. Reglas: 2 o 3 opciones, cada una de "
+    "máximo 20 caracteres (incluye espacios), sin emojis, distintas entre sí y que coincidan con "
+    "lo que dice tu mensaje. Para horarios usa formato corto como 'Jue 20, 5:00 pm' y, si sobra "
+    "lugar, una tercera 'Otro horario'. Escribe igual las opciones dentro del mensaje (por si no "
+    "salen los botones). Úsalos solo cuando de verdad hay que elegir; nunca en confirmaciones, "
+    "despedidas ni respuestas a dudas."
+)
+
+_MARCA_BOTONES = re.compile(r"\[\s*BOTONES\s*:([^\]]*)\]", re.I)
+
+
+def separar_botones(texto: str) -> tuple[str, list[str]]:
+    """
+    Quita la marca [BOTONES: a | b | c] del texto y devuelve (texto_limpio, botones).
+    Los botones solo salen si cumplen las reglas de WhatsApp (2-3, ≤20 caracteres, distintos);
+    si no, se devuelve la lista vacía y el mensaje se manda como texto normal.
+    """
+    if not texto:
+        return texto, []
+    marcas = _MARCA_BOTONES.findall(texto)
+    limpio = re.sub(r"[ \t]*\n?[ \t]*" + _MARCA_BOTONES.pattern, "", texto, flags=re.I).strip()
+    if not marcas:
+        return limpio, []
+    opciones = [o.strip().strip("*_\"'") for o in marcas[-1].split("|")]
+    opciones = [o for o in opciones if o]
+    vistos, botones = set(), []
+    for o in opciones:
+        if o.lower() in vistos:
+            continue
+        vistos.add(o.lower())
+        botones.append(o)
+    if not (2 <= len(botones) <= 3) or any(len(b) > 20 for b in botones) or len(limpio) > 1024:
+        return limpio, []
+    return limpio, botones
+
+
 def _instrucciones_agenda(hay_agenda: bool) -> str:
     """Instruccion en runtime segun si la agenda automatica esta prendida o no."""
     if hay_agenda:
@@ -745,7 +790,7 @@ async def generar_respuesta(
     system_prompt = [
         {
             "type": "text",
-            "text": cargar_system_prompt() + _instrucciones_agenda(hay_agenda),
+            "text": cargar_system_prompt() + _instrucciones_agenda(hay_agenda) + _INSTRUCCION_BOTONES,
             "cache_control": {"type": "ephemeral"},
         },
         {"type": "text", "text": _contexto_temporal() + _bloque_promociones()},
@@ -952,7 +997,9 @@ async def generar_seguimiento(historial: list[dict]) -> str | None:
         "pongas palabras en su boca ('le encantaría…'). PROHIBIDO volver a preguntarle qué le "
         "preocupa o qué busca (nada de '¿sigue siendo X lo que más le preocupa?': eso cansa). Lee "
         "todo el chat (incluye lo que dijo el equipo): no repitas lo ya dicho, no la regañes por no "
-        "contestar y no la satures. Suena natural, sin presión. Máx 2 renglones, 1 emoji.]"
+        "contestar y no la satures. Suena natural, sin presión. Máx 2 renglones, 1 emoji. "
+        "Termina con una línea [BOTONES: ... | ...] de 2 o 3 respuestas cortas que ella pueda tocar "
+        "(máx 20 caracteres cada una, p. ej. 'Ver horarios' | 'Tengo una duda'), acordes a tu mensaje.]"
     )
     mensajes = [{"role": m["role"], "content": m["content"]} for m in historial]
     mensajes.append({"role": "user", "content": instruccion})
