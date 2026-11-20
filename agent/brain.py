@@ -305,19 +305,28 @@ _NOTA_ANUNCIO_GENERAL = (
 )
 
 _NOTA_ANUNCIO_BUEN_FIN = (
-    "\n\n[NOTA INTERNA — no la menciones: viene del anuncio «{titulo}», que promete precios especiales "
-    "de Buen Fin y agendar valoración, NO una sesión gratis: no le ofrezcas primera sesión sin costo. "
+    "\n\n[NOTA INTERNA — no la menciones: viene del anuncio «{titulo}», que promete precios "
+    "especiales de noviembre y agendar valoración, NO una sesión gratis: no le ofrezcas primera sesión sin costo. "
     "Si ya preguntó algo concreto, contéstalo primero. Usa consultar_disponibilidad y en UN solo "
-    "mensaje salúdala, dile que los precios de Buen Fin siguen hasta el 30 de noviembre, que su "
+    "mensaje salúdala, dile que tiene esos precios especiales de noviembre solo hasta el 30 de noviembre (nunca digas 'Buen Fin extendido'), que su "
     "valoración es sin costo y ofrécele dos horarios. Si el título ya dice qué le interesa, no le "
     "preguntes rostro o cuerpo.]"
 )
 
 
+_PIDE_PROMO_NOV = re.compile(r"precio especial de noviembre|promo de buen fin", re.I)
+
+
+def _es_promo_noviembre(texto: str) -> bool:
+    """Anuncios/promos de paquetes de noviembre (antes 'Buen Fin'; desde 20-nov 'Precios especiales de noviembre')."""
+    t = (texto or "").lower()
+    return "buen fin" in t or "especiales de noviembre" in t or t.startswith("noviembre:")
+
+
 def _buen_fin_terminado() -> bool:
     hoy = datetime.now(TZ).date()
     for p in _promociones():
-        if "buen fin" in (p.get("nombre") or "").lower():
+        if _es_promo_noviembre(p.get("nombre") or ""):
             hasta = _a_fecha(p.get("hasta"))
             return bool(hasta and hasta < hoy)
     return True
@@ -331,7 +340,7 @@ async def _nota_primer_mensaje(mensaje: str, telefono: str) -> str:
             titulo = await memory.titulo_anuncio(telefono)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"No se pudo leer el anuncio de origen: {e}")
-    if "buen fin" in titulo.lower():
+    if _es_promo_noviembre(titulo) or _PIDE_PROMO_NOV.search(mensaje):
         # Su texto es el mismo "Quiero más información" de los anuncios de sesión sin costo.
         return "" if _buen_fin_terminado() else _NOTA_ANUNCIO_BUEN_FIN.format(titulo=titulo)
     return _NOTA_ANUNCIO_GENERAL if _SALUDO_GENERAL.match(mensaje.strip()) else ""
