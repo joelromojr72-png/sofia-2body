@@ -1336,3 +1336,66 @@ class BotonesWhatsApp(unittest.TestCase):
         msg = {"type": "interactive", "interactive": {"type": "button_reply",
                "button_reply": {"id": "op1", "title": "Jue 20, 5:00 pm"}}}
         self.assertEqual(_texto_de_mensaje(msg), "Jue 20, 5:00 pm")
+
+
+class AutomatizacionesEmbudo(unittest.TestCase):
+    """21-nov: rescate de faltas, reseñas y aviso a Meta de quién agendó."""
+
+    def _ev(self, cal, titulo, horas, desc=""):
+        from datetime import datetime, timedelta, timezone
+        return {"cal": cal, "titulo": titulo, "desc": desc,
+                "inicio": datetime.now(timezone.utc) - timedelta(hours=horas)}
+
+    def test_clasifica(self):
+        from agent import automatizaciones as a
+        self.assertTrue(a.es_primera_visita(self._ev("cita de venta o ex unica", "Ana - valoración", 1)))
+        self.assertTrue(a.es_primera_visita(self._ev("faciales", "Exp. Única facial sin costo", 1)))
+        self.assertFalse(a.es_pagada(self._ev("faciales", "Exp. Única facial sin costo", 1)))
+        self.assertTrue(a.es_pagada(self._ev("corporales", "Laura Ruiz corporal 3/12", 1)))
+        for t in ("Ana (NO ASISTIÓ)", "no vino", "NO LLEGO A SU SESION", "no se presentó"):
+            self.assertTrue(a.NO_ASISTIO.search(t), t)
+        self.assertFalse(a.NO_ASISTIO.search("Ana Valoración facial"))
+
+    def test_nombre(self):
+        from agent import automatizaciones as a
+        self.assertEqual(a.nombre_de(self._ev("x", "t", 1, "Cliente: ana lópez")), "Ana")
+        self.assertEqual(a.nombre_de(self._ev("x", "CITA", 1)), "de nuevo")
+
+    def test_resena_solo_dia_siguiente_a_la_primera_pagada(self):
+        import asyncio
+        from datetime import datetime, timezone
+        from agent import automatizaciones as a
+        enviados = []
+
+        async def falso_enviar(prov, tel10, plantilla, params, clave):
+            enviados.append((tel10, plantilla, clave))
+            return True
+
+        citas = [("7711111111", self._ev("faciales", "Ana Ruiz facial 1/12", 24)),     # 1a pagada ayer → sí
+                 ("7722222222", self._ev("faciales", "Bety Sol facial 5/12", 24)),     # tenía otra antes → no
+                 ("7722222222", self._ev("faciales", "Bety Sol facial 4/12", 24 * 8)),
+                 ("7733333333", self._ev("faciales", "Caro Paz facial (NO VINO)", 24))]  # falta → no
+        with patch.object(a, "_enviar", falso_enviar):
+            n = asyncio.run(a._paso_resenas(None, citas, datetime.now(timezone.utc)))
+        self.assertEqual(n, 1)
+        self.assertEqual(enviados[0][0], "7711111111")
+        self.assertEqual(enviados[0][2], "resena-7711111111")
+
+    def test_falta_solo_primera_visita_marcada(self):
+        import asyncio
+        from datetime import datetime, timezone
+        from agent import automatizaciones as a
+        enviados = []
+
+        async def falso_enviar(prov, tel10, plantilla, params, clave):
+            enviados.append((tel10, params))
+            return True
+
+        citas = [("7711111111", self._ev("cita de venta o ex unica", "Ana Ruiz valoración (no asistió)", 20)),
+                 ("7722222222", self._ev("cita de venta o ex unica", "Bety Sol valoración", 20)),
+                 ("7733333333", self._ev("faciales", "Caro Paz facial 3/12 no vino", 20)),
+                 ("7744444444", self._ev("cita de venta o ex unica", "Dani valoración no vino", 60))]
+        with patch.object(a, "_enviar", falso_enviar):
+            n = asyncio.run(a._paso_faltas(None, citas, datetime.now(timezone.utc)))
+        self.assertEqual(n, 1)
+        self.assertEqual(enviados[0][0], "7711111111")

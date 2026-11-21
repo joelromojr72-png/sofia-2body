@@ -26,6 +26,7 @@ from agent.brain import estado_cerebro, generar_respuesta, separar_botones
 from agent import ghl
 from agent import ghl_proveedor  # noqa: F401  (registra la tabla ghl_token)
 from agent import ghl_whatsapp  # noqa: F401  (registra la tabla pendiente_wa)
+from agent import automatizaciones  # noqa: F401  (registra la tabla auto_enviado)
 from agent.memory import (
     guardar_mensaje,
     inicializar_db,
@@ -239,6 +240,8 @@ async def lifespan(app: FastAPI):
         # Automatizaciones de GHL por WhatsApp: pendientes de la noche (9:00) y reactivación.
         from agent import ghl_whatsapp
         asyncio.create_task(ghl_whatsapp.loop(proveedor))
+        # Embudo (21-nov): avisar a Meta quién agendó, rescate de faltas y reseñas de Google.
+        asyncio.create_task(automatizaciones.loop(proveedor))
     else:
         logger.error(f"Proveedor de WhatsApp NO configurado: {error_configuracion}")
 
@@ -533,6 +536,16 @@ async def anuncios_report(key: str = "", dias: int = 60):
         for k, v in sorted(por_anuncio.items(), key=lambda kv: -len(kv[1]["clientas"]))
     ]
     return {"desde": desde.isoformat(), "resumen": resumen, "detalle": filas}
+
+
+@app.get("/reporte/asistencia")
+async def reporte_asistencia(key: str = "", dias: int = 30):
+    """Primeras visitas de los últimos N días: cuántas se marcaron como falta y cuántas compraron."""
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    rep = await automatizaciones.reporte_asistencia(max(1, min(dias, 120)))
+    return {**rep, "automatizaciones": dict(automatizaciones.ultimo)}
 
 
 @app.get("/reporte/ventas")
