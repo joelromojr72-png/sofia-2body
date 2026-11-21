@@ -1399,3 +1399,14 @@ class AutomatizacionesEmbudo(unittest.TestCase):
             n = asyncio.run(a._paso_faltas(None, citas, datetime.now(timezone.utc)))
         self.assertEqual(n, 1)
         self.assertEqual(enviados[0][0], "7711111111")
+
+
+class CitasGrises(unittest.TestCase):
+    """21-nov (Joel): las citas grises de Google Calendar son canceladas."""
+
+    def test_gris_es_cancelada(self):
+        from agent.calendar_tool import es_cancelada
+        self.assertTrue(es_cancelada({"colorId": "8"}))
+        self.assertTrue(es_cancelada({"status": "cancelled"}))
+        self.assertFalse(es_cancelada({"colorId": "3"}))
+        self.assertFalse(es_cancelada({}))

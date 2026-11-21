@@ -662,6 +662,38 @@ async def rearmar_nudge_equipo(key: str = ""):
     return {"ok": True, "rearmados": r.rowcount}
 
 
+@app.get("/admin/remarketing")
+async def remarketing(key: str = "", dias: int = 60):
+    """
+    Público de remarketing para Meta: quienes escribieron por WhatsApp en los últimos `dias` y NO
+    agendaron (sin cita en la agenda, no agendadas, sin baja). Devuelve los teléfonos YA CIFRADOS
+    (SHA-256, formato de Meta: 52+10 dígitos y 521+10), nunca en claro. Protegido con clave.
+    """
+    clave = os.getenv("ADMIN_KEY") or os.getenv("META_VERIFY_TOKEN") or ""
+    if not clave or key != clave:
+        raise HTTPException(status_code=403, detail="clave invalida")
+    import hashlib
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from sqlalchemy import select as _sel
+    from agent import calendar_tool
+    from agent.memory import Lead, async_session
+
+    dias = max(7, min(dias, 180))
+    desde = _dt.now(_tz.utc) - _td(days=dias)
+    con_cita = await asyncio.to_thread(calendar_tool.telefonos_con_cita, dias + 30, 90)
+    async with async_session() as s:
+        leads = (await s.execute(_sel(Lead).where(Lead.last_inbound >= desde))).scalars().all()
+    hashes, n = [], 0
+    for l in leads:
+        t10 = "".join(c for c in l.telefono if c.isdigit())[-10:]
+        if len(t10) != 10 or l.telefono.startswith("msgr:") or l.estado in ("opt_out", "agendado") or t10 in con_cita:
+            continue
+        n += 1
+        for v in ("52" + t10, "521" + t10):
+            hashes.append(hashlib.sha256(v.encode()).hexdigest())
+    return {"dias": dias, "personas": n, "con_cita_excluidas": len(con_cita), "hashes": hashes}
+
+
 @app.get("/admin/export")
 async def export_conversaciones(key: str = ""):
     """Exporta TODAS las conversaciones de WhatsApp y los leads (para análisis de ventas). Protegido."""

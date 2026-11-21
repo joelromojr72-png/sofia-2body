@@ -32,6 +32,12 @@ from agent.memory import Base, Lead, Mensaje, OrigenAnuncio, _aware, ahora, asyn
 
 logger = logging.getLogger("agentkit")
 
+
+def _cancelada(ev: dict) -> bool:
+    from agent.calendar_tool import es_cancelada
+
+    return es_cancelada(ev)
+
 # Calendario de servicio pagado → nombre del servicio y variable con el valor del paquete
 _CAL_PAGADOS = {
     "faciales": ("Facial", "VALOR_VENTA_FACIAL", 5999),
@@ -107,8 +113,8 @@ def _leer_agenda(dias_atras: int = 150, dias_adelante: int = 180) -> list[dict]:
     eventos = []
     for cal in svc.calendarList().list().execute().get("items", []):
         nombre_cal = cal.get("summary", "")
-        if "festivo" in _norm(nombre_cal):
-            continue
+        if "festivo" in _norm(nombre_cal) or "cancel" in _norm(nombre_cal):
+            continue  # festivos y el calendario gris de "cancelaciones" no son citas
         token = None
         while True:
             r = svc.events().list(
@@ -116,7 +122,7 @@ def _leer_agenda(dias_atras: int = 150, dias_adelante: int = 180) -> list[dict]:
                 orderBy="startTime", maxResults=2500, pageToken=token,
             ).execute()
             for e in r.get("items", []):
-                if e.get("status") == "cancelled":
+                if _cancelada(e):
                     continue
                 s = (e.get("start") or {}).get("dateTime") or (e.get("start") or {}).get("date")
                 try:

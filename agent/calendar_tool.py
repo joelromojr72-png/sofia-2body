@@ -345,7 +345,7 @@ def sesion_gratis_previa(telefono: str, nombre: str = "", ignorar_dia: date | No
     ini, fin = ahora - timedelta(days=dias_atras), ahora + timedelta(days=dias_adelante)
     for cal_id in _calendarios_disponibilidad():
         for ev in _listar_eventos(svc, cal_id, ini.isoformat(), fin.isoformat()):
-            if ev.get("status") == "cancelled" or (ignorar_evento and ev.get("id") == ignorar_evento):
+            if es_cancelada(ev) or (ignorar_evento and ev.get("id") == ignorar_evento):
                 continue
             titulo, desc = ev.get("summary", "") or "", ev.get("description", "") or ""
             if "cancel" in titulo.lower() or not _ES_GRATIS.search(titulo + " " + desc):
@@ -367,6 +367,16 @@ def sesion_gratis_previa(telefono: str, nombre: str = "", ignorar_dia: date | No
             return {"cuando": f"{_DIAS[di.weekday()]} {di.day}/{di.month} a las {di.strftime('%H:%M')}",
                     "titulo": titulo, "futura": di > ahora}
     return None
+
+
+# Citas canceladas: el equipo las pinta de GRIS (Grafito, colorId 8) o las mueve al calendario
+# "cancelaciones" (que ni se lee aquí). Una cita gris NO ocupa horario, NO recibe recordatorio
+# y NO cuenta en reportes (Joel, 21-nov).
+COLORES_CANCELADA = {c.strip() for c in (os.getenv("COLORES_CANCELADA") or "8").split(",") if c.strip()}
+
+
+def es_cancelada(ev: dict) -> bool:
+    return ev.get("status") == "cancelled" or str(ev.get("colorId") or "") in COLORES_CANCELADA
 
 
 def _calendarios_disponibilidad() -> list[str]:
@@ -520,7 +530,7 @@ def dia_cerrado(fecha: date) -> bool:
     svc = _obtener_servicio()
     if svc:
         for _cal, ev in _eventos_dia_todos(svc, fecha):
-            if ev.get("status") == "cancelled" or ev.get("start", {}).get("dateTime"):
+            if es_cancelada(ev) or ev.get("start", {}).get("dateTime"):
                 continue  # solo eventos de día completo
             if _CIERRE_DIA.search(ev.get("summary", "") or ""):
                 cerrado = True
@@ -611,7 +621,7 @@ def citas_del_dia(fecha: date) -> list[dict]:
 
     citas = []
     for cal_id, ev in _eventos_dia_todos(svc, fecha):
-        if ev.get("status") == "cancelled":
+        if es_cancelada(ev):
             continue
         ini = ev.get("start", {}).get("dateTime")
         f = ev.get("end", {}).get("dateTime")
@@ -709,7 +719,7 @@ def citas_para_confirmar(fecha: date) -> list[dict]:
 
     out = []
     for cal_id, ev in _eventos_dia_todos(svc, fecha):
-        if ev.get("status") == "cancelled":
+        if es_cancelada(ev):
             continue
         ini = ev.get("start", {}).get("dateTime")
         if not ini:
@@ -749,7 +759,7 @@ def eventos_con_hora(fecha: date) -> list[dict]:
     clave_por_id = {cal_id: clave for clave, cal_id, _ in _SERVICE_CALENDARS}
     out = []
     for cal_id, ev in _eventos_dia_todos(svc, fecha):
-        if ev.get("status") == "cancelled":
+        if es_cancelada(ev):
             continue
         ini = (ev.get("start") or {}).get("dateTime")
         if not ini:
@@ -880,7 +890,7 @@ def crear_cita(
     # Su propia cita va primero: si ya tiene una a esa hora, no se le dice "ocupado".
     existentes.sort(key=lambda ce: 0 if _es_de_clienta(ce[1], tel_digits) else 1)
     for _cal, ev in existentes:
-        if ev.get("status") == "cancelled":
+        if es_cancelada(ev):
             continue
         s = ev.get("start", {}).get("dateTime")
         e = ev.get("end", {}).get("dateTime")
@@ -949,7 +959,7 @@ def crear_cita(
     # persona el mismo día. Solo toca citas que tomó Sofía, nunca las del equipo.
     mismos = []
     for cal_id, ev_x in existentes:
-        if ev_x.get("status") == "cancelled":
+        if es_cancelada(ev_x):
             continue
         if cal_id != cal_destino or not ev_x.get("start", {}).get("dateTime"):
             continue
@@ -993,7 +1003,7 @@ def crear_cita(
         nuestro_created = ev.get("created", "")
         previas = 0  # citas de otras clientas a esa hora creadas ANTES que la nuestra
         for _cal, otro in _eventos_dia_todos(svc, inicio.date()):
-            if otro.get("id") == nuestro_id or otro.get("status") == "cancelled":
+            if otro.get("id") == nuestro_id or es_cancelada(otro):
                 continue
             s = otro.get("start", {}).get("dateTime")
             e = otro.get("end", {}).get("dateTime")
@@ -1059,7 +1069,7 @@ def telefonos_con_cita(dias_atras: int = 1, dias_adelante: int = 60) -> set[str]
     tels: set[str] = set()
     for cal_id in _calendarios_disponibilidad():
         for ev in _listar_eventos(svc, cal_id, ini, fin):
-            if ev.get("status") == "cancelled":
+            if es_cancelada(ev):
                 continue
             texto = f"{ev.get('summary', '')} {ev.get('description', '')}"
             # Números de 10+ dígitos aunque vengan con espacios o guiones (771 842 5808).
@@ -1090,7 +1100,7 @@ def buscar_citas_de(telefono: str, dias_adelante: int = 90, nombres: list[str] |
     citas = []
     for cal_id in _calendarios_disponibilidad():
         for ev in _listar_eventos(svc, cal_id, ahora.isoformat(), fin.isoformat()):
-            if ev.get("status") == "cancelled":
+            if es_cancelada(ev):
                 continue
             desc_digits = "".join(c for c in ev.get("summary", "") + ev.get("description", "") if c.isdigit())
             toks_titulo = _tokens(ev.get("summary", ""))

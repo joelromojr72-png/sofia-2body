@@ -28,6 +28,12 @@ from agent import memory
 
 logger = logging.getLogger("agentkit")
 
+
+def _cancelada(ev: dict) -> bool:
+    from agent.calendar_tool import es_cancelada
+
+    return es_cancelada(ev)
+
 TZ = ZoneInfo(os.getenv("FOLLOWUP_TZ") or "America/Mexico_City")
 
 
@@ -547,7 +553,7 @@ async def _ciclo_recordatorio_hoy(proveedor) -> int:
 
     enviados = 0
     for cal_id, ev in eventos:
-        if ev.get("status") == "cancelled":
+        if _cancelada(ev):
             continue
         ini = (ev.get("start") or {}).get("dateTime")
         if not ini:

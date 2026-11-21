@@ -329,7 +329,7 @@ def _ocupadas(dias_atras: int = 45, dias_adelante: int = 60) -> tuple[set[str], 
     textos = []
     for cal_id in ct._calendarios_disponibilidad():
         for ev in ct._listar_eventos(svc, cal_id, ini, fin, estricto=True):
-            if ev.get("status") == "cancelled":
+            if ct.es_cancelada(ev):
                 continue
             texto = f"{ev.get('summary', '')} {ev.get('description', '')}"
             textos.append(_norm(texto))
