@@ -42,12 +42,22 @@ NO_ASISTIO = re.compile(r"no\s*asisti|no\s*vino|no\s*lleg|no\s*se\s*present|falt
 _CANCELADA = re.compile(r"cancel|reagend|bloque|comida|junta|festivo|cerrad", re.I)
 PLANTILLA_FALTA = os.getenv("PLANTILLA_FALTA") or "cita_no_asistio"
 PLANTILLA_RESENA = os.getenv("PLANTILLA_RESENA") or "resena_google"
+PLANTILLA_CLUB = os.getenv("PLANTILLA_CLUB") or "club_2body"
+PLANTILLA_AMIGA = os.getenv("PLANTILLA_AMIGA") or "trae_amiga"
+# Tamaño estándar del paquete por calendario (si el título no trae "N/M"). Ej.: faciales:12
+TAMANO_PAQUETE = {k.strip(): int(v) for k, v in (
+    x.split(":") for x in (os.getenv("CLUB_TAMANOS") or "faciales:12,corporales:12,depilacion:8,masajes:4").split(",") if ":" in x)}
+CLUB_REACTIVAR_DIAS = int(os.getenv("CLUB_REACTIVAR_DIAS") or "30")
+_N_DE_M = re.compile(r"\b(\d{1,2})\s*/\s*(\d{1,2})\b")
+_ORDINAL = re.compile(r"\b(\d{1,2})\s*(?:a|ra|da|ta|va|ma|na|er|ro|do|to|vo|°|º)?\.?\s*(?:sesi|ses\b)", re.I)
+_PALABRAS = {"primera": 1, "primer": 1, "segunda": 2, "tercera": 3, "tercer": 3, "cuarta": 4, "quinta": 5,
+             "sexta": 6, "septima": 7, "séptima": 7, "octava": 8, "novena": 9, "decima": 10, "décima": 10}
 
 ultimo: dict = {}
 
 
 def activo(nombre: str) -> bool:
-    """Cada automatización se puede apagar con AUTO_<NOMBRE>=0 (CAPI, FALTAS, RESENAS)."""
+    """Cada automatización se puede apagar con AUTO_<NOMBRE>=0 (CAPI, FALTAS, RESENAS, AMIGA, CLUB)."""
     return os.getenv(f"AUTO_{nombre}", "1").strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -228,6 +238,11 @@ async def _enviar(proveedor, tel10: str, plantilla: str, params: list[str], clav
                          "pudimos verte. ¿Te ayudamos a reagendarla? (botones: Reagendar mi cita / Ya no me interesa)",
         PLANTILLA_RESENA: f"[Aviso automático] Hola {params[0]}, gracias por visitarnos. ¿Nos regalas tu opinión "
                           "en Google? (botón: Dejar mi opinión)",
+        PLANTILLA_CLUB: f"[Aviso automático · Club 2Body] Hola {params[0]}, ya casi terminas tu paquete. Como clienta "
+                        "del Club 2Body tienes 10% de descuento en tu siguiente paquete si renuevas este mes. "
+                        "(botones: Quiero renovar / Más información)",
+        PLANTILLA_AMIGA: f"[Aviso automático · Trae a una amiga] Hola {params[0]}, ¿tienes una amiga a la que le "
+                         "encantaría 2Body? Si viene de tu parte, las dos ganan una sesión gratis. (botón: ¿Cómo funciona?)",
     }.get(plantilla, f"[Aviso automático: {plantilla}]")
     await _al_historial(tel_wa, texto)
     logger.info(f"[Automatizaciones] {plantilla} enviada a …{tel10[-4:]}")
@@ -269,6 +284,172 @@ async def _paso_resenas(proveedor, citas: list[tuple[str, dict]], ahora: datetim
             enviados += 1
         await asyncio.sleep(1.5)
     return enviados
+
+
+# ── 5) Trae a una amiga (3 días después de su primera sesión pagada) ──────────
+
+async def _paso_amiga(proveedor, citas: list[tuple[str, dict]], ahora: datetime) -> int:
+    pagadas: dict[str, list[dict]] = {}
+    for tel10, ev in citas:
+        if es_pagada(ev) and not _CANCELADA.search(ev["titulo"]) and not NO_ASISTIO.search(ev["titulo"]):
+            pagadas.setdefault(tel10, []).append(ev)
+    enviados = 0
+    for tel10, evs in pagadas.items():
+        primera = min(evs, key=lambda e: e["inicio"])
+        dias = (ahora - primera["inicio"]).total_seconds() / 86400
+        if not (3 <= dias <= 5):
+            continue
+        if await _enviar(proveedor, tel10, PLANTILLA_AMIGA, [nombre_de(primera)], f"amiga-{tel10}"):
+            enviados += 1
+        await asyncio.sleep(1.5)
+    return enviados
+
+
+# ── 6) Club 2Body (penúltima / última sesión del paquete) ─────────────────────
+
+def numero_sesion(titulo: str) -> tuple[int | None, int | None]:
+    """(número de sesión, total del paquete) que dice el título, si lo dice."""
+    m = _N_DE_M.search(titulo)
+    if m:
+        n, tot = int(m.group(1)), int(m.group(2))
+        if 0 < n <= tot <= 40:
+            return n, tot
+    m = _ORDINAL.search(titulo)
+    if m:
+        return int(m.group(1)), None
+    t = titulo.lower()
+    for palabra, n in _PALABRAS.items():
+        if re.search(rf"\b{palabra}\s+sesi", t):
+            return n, None
+    return None, None
+
+
+def club_toca(n: int | None, total: int | None, conteo: int, cal: str) -> tuple[bool, int]:
+    """¿Va en su penúltima o última sesión? Usa N/M del título o el paquete estándar del calendario."""
+    tam = total or TAMANO_PAQUETE.get(cal)
+    if not tam or tam < 3:
+        return False, 0
+    actual = max(n or 0, conteo)
+    return tam - 1 <= actual <= tam, tam
+
+
+async def _paso_club(proveedor, citas: list[tuple[str, dict]], ahora: datetime) -> int:
+    por_cliente: dict[tuple[str, str], list[dict]] = {}
+    for tel10, ev in citas:
+        if es_pagada(ev) and ev["cal"] in TAMANO_PAQUETE and not _CANCELADA.search(ev["titulo"]) \
+                and not NO_ASISTIO.search(ev["titulo"]) and ev["inicio"] <= ahora:
+            por_cliente.setdefault((tel10, ev["cal"]), []).append(ev)
+    enviados = 0
+    for (tel10, cal), evs in por_cliente.items():
+        evs.sort(key=lambda e: e["inicio"])
+        ultima = evs[-1]
+        horas = (ahora - ultima["inicio"]).total_seconds() / 3600
+        if not (16 <= horas <= 52):
+            continue  # el día siguiente a la sesión
+        n, total = numero_sesion(ultima["titulo"])
+        toca, tam = club_toca(n, total, len(evs), cal)
+        if not toca:
+            continue
+        clave = f"club-{tel10}-{cal}-{ultima['inicio'].strftime('%Y-%m')}"
+        if await _enviar(proveedor, tel10, PLANTILLA_CLUB, [nombre_de(ultima)], clave):
+            enviados += 1
+            await una_vez(f"clubfecha-{tel10}-{cal}-{ultima['inicio'].date().isoformat()}")
+        await asyncio.sleep(1.5)
+    return enviados
+
+
+async def _paso_club_reactivar(citas: list[tuple[str, dict]], ahora: datetime) -> int:
+    """Club enviado hace 30+ días y sin nueva sesión ni cita → etiqueta `reactivar` en GHL (reactivación ya existente)."""
+    from agent import ghl
+
+    if not ghl.activo():
+        return 0
+    async with async_session() as s:
+        filas = (await s.execute(select(AutoEnviado).where(AutoEnviado.clave.like("clubfecha-%")))).scalars().all()
+    marcadas = 0
+    for f in filas:
+        _, tel10, cal, fecha = f.clave.split("-", 3)
+        try:
+            enviado = datetime.fromisoformat(fecha).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if ahora - enviado < timedelta(days=CLUB_REACTIVAR_DIAS):
+            continue
+        despues = [ev for t, ev in citas if t == tel10 and ev["inicio"] > enviado + timedelta(days=2)
+                   and not _CANCELADA.search(ev["titulo"])]
+        if despues or not await una_vez(f"clubreact-{tel10}-{fecha}"):
+            continue
+        try:
+            async with ghl._cliente() as c:
+                con = await ghl._buscar_contacto_tel(c, tel10)
+                if con and con.get("id"):
+                    r = await c.post(f"/contacts/{con['id']}/tags", json={"tags": ["reactivar"]})
+                    if r.status_code < 300:
+                        marcadas += 1
+                        logger.info(f"[Automatizaciones] Club sin renovar 30 días → reactivar …{tel10[-4:]}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Automatizaciones] no pude marcar reactivar …{tel10[-4:]}: {e}")
+    return marcadas
+
+
+# ── 7) Referidos: "vengo de parte de …" ──────────────────────────────────────
+
+class Referido(Base):
+    __tablename__ = "referidos"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)  # la amiga que llega
+    referente: Mapped[str] = mapped_column(String(200), default="")
+    texto: Mapped[str] = mapped_column(String(500), default="")
+    creado_en: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+_REFERIDO = re.compile(
+    r"(?:de\s+parte\s+de|me\s+recomend[oó]|recomendaci[oó]n\s+de|me\s+recomendaron|"
+    r"me\s+(?:pas[oó]|dio)\s+(?:su|el|tu)\s+(?:n[uú]mero|contacto)|recomendada\s+(?:por|de))\s*(.{0,60})",
+    re.I,
+)
+
+
+def menciona_referido(texto: str) -> bool:
+    return bool(_REFERIDO.search(texto or ""))
+
+
+async def registrar_referido(telefono: str, texto: str) -> None:
+    """Guarda quién la recomendó y lo deja anotado en GHL (nota + etiqueta) para dar el premio."""
+    m = _REFERIDO.search(texto or "")
+    if not m:
+        return
+    referente = re.split(r"[.,!?\n]| y | quiero| para| me | que ", m.group(1).strip(), maxsplit=1)[0].strip()[:120]
+    try:
+        async with async_session() as s:
+            r = await s.get(Referido, telefono)
+            if r is None:
+                s.add(Referido(telefono=telefono, referente=referente, texto=texto[:500]))
+            elif referente and len(referente) > len(r.referente or ""):
+                r.referente, r.texto = referente, texto[:500]
+            await s.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[Referidos] no se pudo guardar …{telefono[-4:]}: {e}")
+    logger.info(f"[Referidos] …{telefono[-4:]} viene de parte de: {referente or '(sin nombre)'}")
+    try:
+        from agent import ghl
+
+        if ghl.activo():
+            async with ghl._cliente() as c:
+                cid = await ghl._contacto(c, telefono, "")
+                await c.post(f"/contacts/{cid}/tags", json={"tags": ["referida"]})
+                await c.post(f"/contacts/{cid}/notes", json={"body": (
+                    f"🎁 TRAE A UNA AMIGA: viene de parte de «{referente or 'no dijo el nombre'}». "
+                    f"Mensaje: «{texto[:200]}». Cuando contrate su paquete, las DOS ganan una sesión gratis.")})
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[Referidos] GHL …{telefono[-4:]}: {e}")
+
+
+async def lista_referidos() -> list[dict]:
+    async with async_session() as s:
+        filas = (await s.execute(select(Referido).order_by(Referido.creado_en.desc()))).scalars().all()
+    return [{"telefono": f"…{r.telefono[-4:]}", "referente": r.referente, "fecha": r.creado_en.isoformat()[:10]}
+            for r in filas]
 
 
 # ── 4) Asistencia ─────────────────────────────────────────────────────────────
@@ -322,6 +503,12 @@ async def ciclo(proveedor) -> dict:
             r["faltas_rescatadas"] = await _paso_faltas(proveedor, citas, ahora)
         if activo("RESENAS"):
             r["resenas_pedidas"] = await _paso_resenas(proveedor, citas, ahora)
+        if activo("AMIGA"):
+            r["trae_amiga"] = await _paso_amiga(proveedor, citas, ahora)
+        if activo("CLUB"):
+            r["club_2body"] = await _paso_club(proveedor, citas, ahora)
+    if activo("CLUB"):
+        r["club_a_reactivacion"] = await _paso_club_reactivar(citas, ahora)
     ultimo.clear()
     ultimo.update(r, en=local.isoformat(timespec="minutes"))
     return r

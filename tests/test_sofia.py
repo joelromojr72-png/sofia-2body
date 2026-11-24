@@ -1410,3 +1410,49 @@ class CitasGrises(unittest.TestCase):
         self.assertTrue(es_cancelada({"status": "cancelled"}))
         self.assertFalse(es_cancelada({"colorId": "3"}))
         self.assertFalse(es_cancelada({}))
+
+
+class ClubYAmiga(unittest.TestCase):
+    """23-nov: Club 2Body (penúltima/última sesión) y Trae a una amiga."""
+
+    def test_numero_sesion(self):
+        from agent.automatizaciones import numero_sesion
+        self.assertEqual(numero_sesion("ANA FACIAL 11/12"), (11, 12))
+        self.assertEqual(numero_sesion("CATALINA BAUTISTA 5TA.SESION FACIAL"), (5, None))
+        self.assertEqual(numero_sesion("GLADYS CORPORAL 3ER. SESION"), (3, None))
+        self.assertEqual(numero_sesion("VICTORIA CASTILLO 3 RA SESION DE DEPILACION"), (3, None))
+        self.assertEqual(numero_sesion("VERONICA RAMIREZ TERCER SESION EMS"), (3, None))
+        self.assertEqual(numero_sesion("ROSA MARIA ROSAS"), (None, None))
+
+    def test_club_toca(self):
+        from agent.automatizaciones import club_toca
+        self.assertTrue(club_toca(11, 12, 3, "faciales")[0])
+        self.assertTrue(club_toca(None, None, 12, "faciales")[0])
+        self.assertTrue(club_toca(7, None, 2, "depilacion")[0])
+        self.assertFalse(club_toca(5, None, 5, "faciales")[0])
+        self.assertFalse(club_toca(11, 24, 11, "faciales")[0])   # paquete de 24: aún no
+        self.assertFalse(club_toca(None, None, 13, "faciales")[0])
+
+    def test_referido(self):
+        from agent.automatizaciones import menciona_referido, _REFERIDO
+        self.assertTrue(menciona_referido("Hola, vengo de parte de Laura Pérez"))
+        self.assertTrue(menciona_referido("me recomendó mi amiga Sofi"))
+        self.assertFalse(menciona_referido("Quiero mi sesión SIN COSTO 💜"))
+
+    def test_amiga_tres_dias_despues(self):
+        import asyncio
+        from datetime import datetime, timedelta, timezone
+        from agent import automatizaciones as a
+        ahora = datetime.now(timezone.utc)
+        ev = lambda t, d: {"cal": "faciales", "titulo": t, "desc": "", "inicio": ahora - timedelta(days=d)}
+        enviados = []
+
+        async def falso(prov, tel10, plantilla, params, clave):
+            enviados.append(tel10)
+            return True
+
+        citas = [("7711111111", ev("Ana facial 1er sesion", 3.5)), ("7722222222", ev("Bety facial", 1)),
+                 ("7733333333", ev("Caro facial", 3.5)), ("7733333333", ev("Caro facial", 20))]
+        with patch.object(a, "_enviar", falso):
+            asyncio.run(a._paso_amiga(None, citas, ahora))
+        self.assertEqual(enviados, ["7711111111"])

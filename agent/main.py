@@ -545,7 +545,8 @@ async def reporte_asistencia(key: str = "", dias: int = 30):
     if not clave or key != clave:
         raise HTTPException(status_code=403, detail="clave invalida")
     rep = await automatizaciones.reporte_asistencia(max(1, min(dias, 120)))
-    return {**rep, "automatizaciones": dict(automatizaciones.ultimo)}
+    return {**rep, "automatizaciones": dict(automatizaciones.ultimo),
+            "referidos": await automatizaciones.lista_referidos()}
 
 
 @app.get("/reporte/ventas")
@@ -853,6 +854,10 @@ async def _procesar_entrantes(request, tareas, prov, aplicar_horario):
         if evento_id and not await marcar_evento_procesado(evento_id):
             logger.info(f"Evento repetido, se ignora: {evento_id}")
             continue
+
+        # "Trae a una amiga": si dice que viene de parte de alguien, se anota (BD + GHL).
+        if not msg.telefono.startswith("msgr:") and automatizaciones.menciona_referido(msg.texto):
+            asyncio.create_task(automatizaciones.registrar_referido(msg.telefono, msg.texto))
 
         # En horario del equipo Sofía NO responde (atiende el equipo en vivo), PERO en
         # WhatsApp registra el lead para que ENTRE al seguimiento y no se enfríe: si la
