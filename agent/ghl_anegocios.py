@@ -305,7 +305,10 @@ async def _asegurar_factura(c: httpx.AsyncClient, t: dict, contacto: dict, exist
                   "termsNotes": f"Venta registrada en Anegocios (ticket {t['folio']})."
                                 + (f" Vendió: {t['vendio']}." if t["vendio"] else "")}
         r = await c.post("/invoices/", json=cuerpo)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # Se guarda el motivo que da GHL (antes solo se veía "422 Unprocessable Entity").
+            raise RuntimeError(f"GHL rechazó la factura del ticket {t['folio']} [{r.status_code}]: {r.text[:300]} "
+                               f"· items={items} descuento={descuento}")
         existente = r.json()
         cuenta["facturas_nuevas"] += 1
     ya = float(existente.get("amountPaid") or 0)
